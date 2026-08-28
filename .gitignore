@@ -20,3 +20,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Sauvegardes PostgreSQL
+backup/sauvegardes/
