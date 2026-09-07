@@ -1,0 +1,10 @@
+# Dependances de production HAKILI LAB - version sans assistant IA / MCP
+shiny==1.7.0
+pandas==3.0.5
+psycopg2-binary==2.9.12
+openpyxl==3.1.5
+python-dotenv==1.2.3
+bcrypt>=4.0
+
+# Tests automatises
+pytest>=7.0
