@@ -1,158 +1,379 @@
-# HAKILI LAB — version de déploiement
+# HAKILI LAB
 
-Application de saisie, contrôle, validation et export comptable de Hakili Lab. Cette version est **sans assistant IA, sans MCP et sans Chatlas**. Elle utilise Shiny for Python et PostgreSQL.
+**Application de gestion comptable, de saisie, de contrôle et de validation des opérations financières.**
+
+HAKILI LAB est une application web développée pour faciliter la gestion des opérations comptables, le suivi des écritures et leur préparation pour l'export vers **Sage**.
+
+L'application permet notamment de gérer les opérations liées aux différents centres, aux élèves, aux fournisseurs, au personnel et aux autres tiers enregistrés dans le référentiel comptable.
+
+---
 
 ## Fonctionnalités
 
-- saisie des opérations par modèles ;
-- plan comptable, journaux, centres et comptes tiers ;
-- contrôle et validation des pièces ;
-- export Sage ;
-- authentification et mots de passe hachés avec bcrypt ;
-- rafraîchissement réactif multi-postes via PostgreSQL ;
-- listes déroulantes des élèves et vacataires alimentées par le plan tiers ;
-- journal bancaire **CBI** (compte 521100) à la place de l'ancien journal BDU-BF.
+### Gestion comptable
 
-## Structure
+* Saisie des opérations comptables à partir de modèles prédéfinis
+* Gestion des recettes et des dépenses
+* Gestion des journaux comptables
+* Gestion des centres
+* Gestion du plan comptable
+* Gestion du plan de tiers
+* Attribution des comptes et des tiers aux opérations
+* Numérotation des pièces
+* Consultation des écritures
+
+### Gestion des tiers
+
+Les formulaires permettent de rechercher et sélectionner les tiers directement à partir du plan de tiers.
+
+L'application prend notamment en charge :
+
+* les élèves ;
+* les fournisseurs ;
+* les vacataires ;
+* le personnel ;
+* les autres tiers comptables.
+
+Un tiers existant peut être recherché par son nom ou son code.
+
+Lorsqu'un tiers n'existe pas encore dans le référentiel, il peut être ajouté directement depuis le formulaire concerné.
+
+### Contrôle et validation
+
+Les opérations peuvent suivre différents états :
+
+* **En attente de validation**
+* **Validée**
+* **À corriger**
+* **Exportée vers Sage**
+
+Ce fonctionnement permet de distinguer les opérations saisies des opérations définitivement validées.
+
+### Export comptable
+
+Les opérations validées peuvent être préparées pour leur export vers **Sage** selon le format défini par l'application.
+
+### Authentification
+
+L'application intègre une gestion des utilisateurs avec authentification sécurisée et stockage des mots de passe sous forme de hash.
+
+---
+
+## Technologies utilisées
+
+* **Python 3.14**
+* **Shiny for Python**
+* **PostgreSQL 17**
+* **Pandas**
+* **Psycopg2**
+* **OpenPyXL**
+* **python-dotenv**
+* **bcrypt**
+* **Docker**
+* **Docker Compose**
+* **Nginx**
+
+---
+
+## Architecture du projet
 
 ```text
-app.py
-logic/
-  donnees.py
-  modeles.py
-sql/
-  schema.sql
-  seed.sql
-  production_reset.sql
-  migrations/
-www/
-backup/
-Dockerfile
-docker-compose.yml
-.env.example
-requirements.txt
-tests/
+HAKILI_LAB_postgres_2_DEPLOIEMENT/
+│
+├── app.py
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+├── .gitignore
+├── README.md
+│
+├── logic/
+│   ├── donnees.py
+│   ├── modeles.py
+│   └── ...
+│
+├── sql/
+│   ├── schema.sql
+│   ├── seed.sql
+│   └── ...
+│
+├── tests/
+│   └── ...
+│
+├── www/
+│   └── ressources web et éléments visuels
+│
+├── nginx/
+│   └── configuration du serveur
+│
+└── backup/
+    └── sauvegardes
 ```
 
-Aucun `.env`, log, environnement virtuel, cache Python, brouillard Excel ou fichier de données transactionnelles n'est livré dans cette version. Les modules MCP/IA ont été retirés.
+---
 
 ## Prérequis
 
-- Python 3.14 recommandé ;
-- PostgreSQL 17 recommandé ;
-- une base PostgreSQL `Hakili_compta` accessible par l'application ;
-- Docker/Compose si déploiement conteneurisé.
+Avant d'installer HAKILI LAB, il est nécessaire de disposer de :
 
-## Configuration locale
+* Python 3.14 ou version compatible
+* PostgreSQL 17
+* Git
+* Docker et Docker Compose, si le déploiement par conteneurs est utilisé
 
-1. Copier `.env.example` vers `.env`.
-2. Renseigner uniquement `DATABASE_URL` (ou les variables `PG*`).
-3. Installer les dépendances :
+---
+
+# Installation en local
+
+## 1. Cloner le projet
+
+```powershell
+git clone https://github.com/imaneodg/hakili-lab-comptabilite.git
+cd hakili-lab-comptabilite
+```
+
+---
+
+## 2. Créer l'environnement virtuel
+
+Sous Windows :
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+```
+
+Activer l'environnement :
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+---
+
+## 3. Installer les dépendances
+
+```powershell
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-4. Préparer la base :
+---
+
+# Configuration de PostgreSQL
+
+HAKILI LAB utilise PostgreSQL comme système de gestion de base de données.
+
+Créer une base de données dédiée à l'application, puis configurer la connexion dans le fichier `.env`.
+
+Exemple :
+
+```env
+DATABASE_URL=postgresql://UTILISATEUR:MOT_DE_PASSE@localhost:5432/Hakili_compta
+```
+
+**Ne jamais publier le fichier `.env` sur GitHub.**
+
+Le fichier `.env.example` peut être utilisé comme modèle de configuration.
+
+---
+
+# Initialisation de la base de données
+
+Après avoir configuré PostgreSQL, les scripts SQL permettent de préparer la base de données.
+
+Exemple :
 
 ```powershell
 psql "$env:DATABASE_URL" -f sql/schema.sql
+```
+
+Puis :
+
+```powershell
 psql "$env:DATABASE_URL" -f sql/seed.sql
 ```
 
-Pour une base existante contenant le référentiel et des données de test, utiliser **une seule fois** `sql/production_reset.sql` sur la base concernée. Ce script conserve le référentiel et les autres tiers.
+Le script `seed.sql` initialise les données de référence nécessaires au fonctionnement de l'application.
 
-### Important sur les élèves/vacataires
+---
 
-Le code de l'application ne fabrique plus de tiers à partir d'un texte saisi. Les listes sont construites à partir des lignes déjà présentes dans `tiers` :
+# Lancer HAKILI LAB
 
-- élèves : tiers dont le code commence par `411`, actifs pour l'année ;
-- vacataires/bénéficiaires : tiers dont le code commence par `422`, actifs pour l'année.
-
-Le choix renvoie le **code tiers**, puis ce code est reconfirmé au moment de l'enregistrement de l'écriture. Le formulaire « Frais de document » utilise également le compte tiers élève `411`.
-
-Le fichier `seed.sql` fourni dans l'archive ne contient pas la liste réelle des élèves/vacataires : il contient le référentiel comptable générique. Il faut donc conserver/importer les vrais tiers de votre base de production avant la saisie. **Aucun nom de tiers réel n'est inventé ici.**
-
-## Lancer l'application
+Une fois l'environnement virtuel activé et les dépendances installées :
 
 ```powershell
 shiny run --reload app.py
 ```
 
-Puis ouvrir `http://127.0.0.1:8000`.
+L'application est ensuite accessible depuis le navigateur à l'adresse indiquée par Shiny.
 
-## Docker
+---
 
-Construire et lancer l'application :
+# Utilisation
+
+L'application est organisée autour des principales étapes du traitement comptable :
+
+1. Sélection du modèle d'opération
+2. Saisie des informations
+3. Sélection du compte ou du tiers
+4. Enregistrement de l'opération
+5. Contrôle des écritures
+6. Validation
+7. Préparation de l'export comptable
+
+Les listes de comptes, journaux, centres et tiers sont alimentées à partir des données de référence enregistrées dans PostgreSQL.
+
+---
+
+# Données de référence
+
+Le référentiel comptable comprend notamment :
+
+* les comptes ;
+* les journaux ;
+* les centres ;
+* les tiers ;
+* les types de libellés ;
+* les utilisateurs.
+
+Les données opérationnelles sont séparées des données de référence afin de préserver la structure comptable de l'application.
+
+---
+
+# Tests
+
+Les tests du projet se trouvent dans le dossier :
+
+```text
+tests/
+```
+
+Pour lancer les tests :
+
+```powershell
+pytest
+```
+
+---
+
+# Déploiement avec Docker
+
+HAKILI LAB peut également être exécuté avec Docker.
+
+Construire l'image :
 
 ```powershell
 docker build -t hakili-lab .
-docker run --rm -p 8000:8000 --env-file .env hakili-lab
 ```
 
-Ou avec Compose :
+Lancer les services :
 
 ```powershell
-docker compose up -d --build
+docker compose up -d
 ```
 
-Le PostgreSQL n'est pas inclus dans ce Compose : `DATABASE_URL` doit pointer vers votre PostgreSQL de production. Le reverse proxy Nginx fourni doit être configuré avec un vrai certificat TLS avant exposition Internet.
-
-## Sécurité
-
-- `.env` est ignoré par Git ;
-- aucune clé API n'est nécessaire dans cette version ;
-- ne jamais mettre de mot de passe PostgreSQL dans `app.py`, `Dockerfile`, `seed.sql` ou le dépôt Git ;
-- utiliser TLS via Nginx ou un reverse proxy équivalent ;
-- sauvegarder PostgreSQL indépendamment de l'application.
-
-## Remise à zéro avant production
-
-`sql/production_reset.sql` :
-
-- supprime toutes les lignes de `ecritures` ;
-- supprime la trace des suppressions de pièces ;
-- réinitialise les compteurs ;
-- supprime le tiers de test `Ouedraogo Afiya` ;
-- remplace le journal bancaire `BDU-BF` par `CBI` s'il existe encore ;
-- met à jour l'intitulé du compte bancaire `521100` en `Banques (CBI)` ;
-- remet le watermark `revision` à zéro ;
-- **ne supprime pas** les comptes, journaux, centres, libellés, utilisateurs ni les autres tiers.
-
-Exécuter :
+Vérifier les conteneurs :
 
 ```powershell
-psql "$env:DATABASE_URL" -f sql/production_reset.sql
+docker compose ps
 ```
 
-Puis vérifier :
-
-```sql
-SELECT count(*) FROM ecritures;
-SELECT count(*) FROM suppressions_ecritures;
-SELECT count(*) FROM compteurs;
-SELECT count(*) FROM tiers WHERE lower(btrim(intitule)) = lower('Ouedraogo Afiya');
-```
-
-Les trois premiers résultats doivent être `0` et le dernier également `0`.
-
-## Tests
-
-Les tests d'authentification et utilitaires nécessitent un PostgreSQL configuré via `.env`.
+Consulter les journaux :
 
 ```powershell
-pytest tests -v
+docker compose logs -f
 ```
 
-## GitHub
+Arrêter les services :
 
-Avant le premier commit, vérifier :
+```powershell
+docker compose down
+```
+
+---
+
+# Sécurité
+
+Les informations sensibles ne doivent jamais être versionnées dans Git.
+
+Le dépôt ne doit notamment pas contenir :
+
+* le fichier `.env` ;
+* les mots de passe PostgreSQL ;
+* les clés ou secrets d'authentification ;
+* l'environnement virtuel `.venv` ;
+* les fichiers Python temporaires ;
+* les données comptables confidentielles.
+
+Les paramètres sensibles doivent être configurés dans l'environnement de déploiement.
+
+---
+
+# Sauvegarde de la base de données
+
+La base PostgreSQL doit être sauvegardée régulièrement afin de préserver les données comptables.
+
+Exemple de sauvegarde PostgreSQL :
+
+```powershell
+pg_dump "$env:DATABASE_URL" > backup.sql
+```
+
+La procédure de restauration doit être réalisée avec précaution et après vérification de la sauvegarde.
+
+---
+
+# Développement
+
+Pour contribuer au développement :
 
 ```powershell
 git status
-git diff --check
 ```
 
-Le dépôt ne doit contenir ni `.env`, ni mot de passe, ni clé API, ni données transactionnelles de test.
+Vérifier les modifications :
+
+```powershell
+git diff
+```
+
+Puis, après validation :
+
+```powershell
+git add .
+git commit -m "Description de la modification"
+git push
+```
+
+---
+
+# Dépôt GitHub
+
+Projet :
+
+**HAKILI LAB — Comptabilité**
+
+Dépôt GitHub :
+
+https://github.com/imaneodg/hakili-lab-comptabilite
+
+La branche principale utilisée pour la version actuelle du projet est :
+
+```text
+main
+```
+
+---
+
+## Licence
+
+Projet développé dans le cadre de la conception et du déploiement d'une solution de gestion comptable.
+
+---
+
+## Auteur
+
+**HAKILI LAB**
+
+Application de gestion comptable développée avec Python, Shiny et PostgreSQL.
