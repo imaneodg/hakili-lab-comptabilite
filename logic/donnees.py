@@ -213,8 +213,15 @@ def ajouter_utilisateur(identifiant, nom, role, centre, code_acces):
     code_acces = str(code_acces or "").strip()
     if not code_acces:
         raise ValueError("Le code d'acces est obligatoire.")
-    if len(code_acces) < 4:
-        raise ValueError("Le code d'acces doit comporter au moins 4 caracteres.")
+    # Releve de 4 a 6 caracteres (10/09/2026) : un code a 4 chiffres n'offre
+    # que 10 000 combinaisons, cassable en quelques jours de tentatives
+    # automatisees meme avec le verrouillage anti brute-force ci-dessous.
+    # Ne s'applique qu'aux comptes crees a partir de maintenant - les codes
+    # deja en base, meme a 4 caracteres, continuent de fonctionner
+    # (verifier_code_acces ne relit jamais cette regle a la connexion) ; a
+    # faire changer manuellement aux utilisateurs concernes si besoin.
+    if len(code_acces) < 6:
+        raise ValueError("Le code d'acces doit comporter au moins 6 caracteres.")
     with _connexion() as c, c.cursor() as cur:
         cur.execute("SELECT 1 FROM utilisateurs WHERE lower(identifiant) = %s", (identifiant,))
         if cur.fetchone():
@@ -282,10 +289,19 @@ def tenter_connexion(identifiant, centre, code):
     """
     identifiant = str(identifiant or "").strip().lower()
     with _connexion() as c, c.cursor() as cur:
+        # FOR UPDATE (10/09/2026) : sans lui, deux tentatives lancees en
+        # parallele sur le meme compte lisent le meme "tentatives_echouees"
+        # avant que l'une des deux n'ait ecrit la sienne, et le compteur
+        # avance moins vite que le nombre reel d'essais - exactement le
+        # scenario d'un script de brute-force, qui envoie ses tentatives en
+        # parallele plutot qu'une par une. Le verrou porte sur cette seule
+        # ligne (un identifiant+centre precis) : il serialise les tentatives
+        # concurrentes sur UN compte, sans jamais bloquer la connexion d'un
+        # autre utilisateur pendant ce temps.
         cur.execute(
             "SELECT identifiant, nom, role, centre, code_acces, actif, "
             "tentatives_echouees, verrouille_jusqu_a, now() FROM utilisateurs "
-            "WHERE lower(identifiant) = %s AND centre = %s",
+            "WHERE lower(identifiant) = %s AND centre = %s FOR UPDATE",
             (identifiant, centre))
         row = cur.fetchone()
         if row is None:
@@ -833,7 +849,15 @@ def format_sage(d, ref):
 
 
 def ecrire_fichier_sage(x, chemin):
-    x.to_csv(chemin, sep=";", index=False, header=False, encoding="latin1", na_rep="")
+    # cp1252 plutot que latin1 (corrige le 10/09/2026) : sur-ensemble de
+    # latin-1 qui couvre en plus "oe" (manoeuvre, soeur), les guillemets
+    # typographiques et le tiret cadratin - des caracteres qu'un copier-coller
+    # depuis Word peut introduire dans un libelle libre, et que c'est
+    # generalement ce qu'attend un import Windows/Sage. errors="replace" en
+    # filet de securite final : un caractere malgre tout hors cp1252 devient
+    # "?" au lieu de faire planter l'ecriture du fichier entier.
+    x.to_csv(chemin, sep=";", index=False, header=False, encoding="cp1252",
+              errors="replace", na_rep="")
 
 
 # --- synchronisation entre postes -------------------------------------------------

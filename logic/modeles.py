@@ -18,12 +18,26 @@
 # traduction debit/credit.
 # ---------------------------------------------------------------------------
 
+import logging
 import re
 
 import pandas as pd
 
+# Journal des echecs de construction de ligne (voir construire_lignes,
+# ajoute le 10/09/2026) - meme processus que logic.donnees, un seul
+# logging.basicConfig au point d'entree (app.py) configure les handlers
+# pour tous les loggers "hakili.*".
+logger = logging.getLogger("hakili.modeles")
+
 MOIS_FR = ["JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN", "JUILLET",
            "AOUT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE"]
+
+# Longueur maximale d'un libelle applique par ligne() ci-dessous - purement
+# une convention applicative (ecritures.libelle est un `text` Postgres sans
+# limite), reprise ici pour que les fonctions qui composent un libelle avec
+# un suffixe "/MOIS" (voir _libelle_avec_mois) puissent reserver la place du
+# suffixe sans dupliquer le nombre en dur.
+LIBELLE_MAX = 60
 
 # Prefixe de libelle selon la nature d'une ligne de reglement (formulaire
 # "encaissement", mode multi-mois) - conventions deja utilisees dans les
@@ -74,10 +88,26 @@ def ligne(compte, libelle, debit=0, credit=0, code_tiers=""):
     return {
         "compte": str(un(compte)),
         "code_tiers": str(un(code_tiers)),
-        "libelle": str(un(libelle))[:60].upper(),
+        "libelle": str(un(libelle))[:LIBELLE_MAX].upper(),
         "debit": float(un(debit, 0) or 0),
         "credit": float(un(credit, 0) or 0),
     }
+
+
+# Compose "PREFIXE NOM/MOIS" en tronquant NOM (jamais le suffixe "/MOIS") si
+# le total depasse LIBELLE_MAX - corrige le 10/09/2026 : avant, c'etait le
+# libelle final deja compose qui etait tronque a 60 caracteres par ligne()
+# ci-dessus, ce qui coupait le plus souvent la fin "/MOIS" (la partie la
+# plus a droite, donc la plus exposee, notamment avec un nom d'eleve compose
+# un peu long). mois_depuis_libelle() ne reconnaissant alors plus le mois,
+# la suggestion automatique du mois suivant d'une avance redevenait
+# silencieusement le mois du jour - un confort perdu sans aucune erreur pour
+# le signaler.
+def _libelle_avec_mois(prefixe, nom, mois):
+    nom = str(un(nom, "")).strip()
+    suffixe = f"/{mois}"
+    place_pour_nom = max(0, LIBELLE_MAX - len(prefixe) - 1 - len(suffixe))
+    return f"{prefixe} {nom[:place_pour_nom]}{suffixe}"
 
 
 def _df(*lignes_):
@@ -509,7 +539,7 @@ def _lignes_encaissement(v, cc):
         if not mois:
             continue
         prefixe = PREFIXES_NATURE.get(row.get("nature"), "FRAIS CA")
-        libelle = f"{prefixe} {v.get('tiers_nom', '')}/{mois}"
+        libelle = _libelle_avec_mois(prefixe, v.get("tiers_nom", ""), mois)
         lignes_411.append(ligne("411000", libelle, credit=montant, code_tiers=v.get("tiers", "")))
     if not lignes_411:
         return None
@@ -539,7 +569,8 @@ def _lignes_avance_paiement(v, cc):
         reparti += m
         mois_nom = MOIS_FR[(idx_depart + i) % 12]
         lignes_mensuelles.append(
-            ligne("411000", f"AVANCE {v['lib']}/{mois_nom}", credit=m, code_tiers=v.get("tiers", ""))
+            ligne("411000", _libelle_avec_mois("AVANCE", v["lib"], mois_nom),
+                  credit=m, code_tiers=v.get("tiers", ""))
         )
 
     return _df(ligne(cc, v["lib"], debit=montant_total), *lignes_mensuelles)
@@ -651,6 +682,12 @@ def construire_lignes(id_modele, valeurs, journal, journaux_ref):
     try:
         L = fn_lignes(v, cc)
     except Exception:
+        # Corrige le 10/09/2026 : cette exception etait totalement avalee -
+        # l'utilisateur voyait juste "Renseignez l'operation", indiscernable
+        # d'un formulaire simplement incomplet, et rien n'indiquait qu'un
+        # modele etait casse. Le comportement fonctionnel ne change pas
+        # (toujours None), mais l'incident devient diagnosticable.
+        logger.exception("Echec de construction des lignes (modele=%s, journal=%s)", id_modele, journal)
         return None
     if L is None or len(L) == 0:
         return None

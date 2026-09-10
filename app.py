@@ -141,10 +141,21 @@ h1, h2, h3, h4, h5 { font-family:inherit; color:var(--encre); }
    affiche par defaut, un geste de plus pour agir. */
 .btn-icone { width:27px; height:27px; border-radius:50%; border:1px solid var(--bord);
   background:var(--surface); color:var(--gris); font-size:16px; line-height:1; cursor:pointer;
-  display:flex; align-items:center; justify-content:center; padding:0; transition:.12s; }
+  display:flex; align-items:center; justify-content:center; padding:0; transition:.12s;
+  /* Ce bouton n'est pas une variante Bootstrap (btn-primary, btn-secondary...) :
+     sans ces variables, l'etat "presse" retombe sur la regle Bootstrap
+     ".btn-outline-default, .btn-default:not(.btn-primary, ...)" (bootstrap.min.css)
+     qui met --bs-btn-active-bg a #404040 (gris tres fonce). Cette regle a une
+     specificite plus elevee (0,2,0, a cause du :not()) que ".btn-icone" seul
+     (0,1,0) : sans !important elle gagne quand meme et le bouton flashe en
+     sombre a chaque clic au lieu de rester dans ses propres tons discrets. */
+  --bs-btn-active-bg:var(--bleu-teinte) !important; --bs-btn-active-color:var(--bleu) !important;
+  --bs-btn-active-border-color:var(--bleu) !important; }
 .btn-icone:hover { background:var(--bleu-teinte); border-color:var(--bleu); color:var(--bleu); }
 .btn-texte { border:none; background:none; color:var(--bleu); font-size:12.5px;
-  font-weight:600; padding:0; cursor:pointer; }
+  font-weight:600; padding:0; cursor:pointer;
+  --bs-btn-active-bg:transparent !important; --bs-btn-active-color:var(--bleu) !important;
+  --bs-btn-active-border-color:transparent !important; }
 .btn-texte:hover { text-decoration:underline; }
 .popover-form { min-width:230px; }
 .popover-form .form-group:last-child { margin-bottom:0; }
@@ -257,9 +268,13 @@ table.apercu tfoot td { font-weight:700; border-top:2px solid var(--encre); }
 .btn-primary { background:var(--bleu); border-color:var(--bleu); }
 .btn-primary:hover { background:var(--bleu-sombre); border-color:var(--bleu-sombre); }
 .btn-sm { padding:5px 13px; font-size:12.5px; }
-.btn-discret { background:var(--surface); border:1px solid var(--bord); color:var(--gris); }
+.btn-discret { background:var(--surface); border:1px solid var(--bord); color:var(--gris);
+  --bs-btn-active-bg:var(--fond) !important; --bs-btn-active-color:var(--encre) !important;
+  --bs-btn-active-border-color:var(--bord-fort) !important; }
 .btn-discret:hover { background:var(--fond); border-color:var(--bord-fort); color:var(--encre); }
-.btn-danger-discret { background:var(--surface); border:1px solid var(--bord); color:var(--rouge); }
+.btn-danger-discret { background:var(--surface); border:1px solid var(--bord); color:var(--rouge);
+  --bs-btn-active-bg:var(--rouge-teinte) !important; --bs-btn-active-color:var(--rouge) !important;
+  --bs-btn-active-border-color:var(--rouge) !important; }
 .btn-danger-discret:hover { background:var(--rouge-teinte); border-color:var(--rouge); }
 
 /* Barre d'actions compacte au-dessus d'un tableau : action principale
@@ -766,7 +781,7 @@ def server(input, output, session):
                         ui.input_action_link("deconnexion", "Fermer la session",
                                               style="display:block")),
                 ),
-                ui.div({"class": "corps-page"}, ui.navset_tab(*onglets(u), id="onglets")),
+                ui.div({"class": "corps-page"}, ui.output_ui("corps")),
             )
 
         entete = ui.div({"style": "text-align:center;margin-bottom:18px"},
@@ -790,6 +805,29 @@ def server(input, output, session):
                 ui.output_ui("l_msg"),
             ),
         )
+
+    # Corrige le 10/09/2026 : page() appelait onglets(u) directement, qui lit
+    # ref() -> _disque() (sondage 0,5 s sur les ecritures des 5 centres,
+    # cf. plus haut). Consequence : chaque piece enregistree n'importe ou
+    # invalidait page() entierement - tous les onglets recrees, m_modele et
+    # m_journal remis a leur valeur par defaut, formulaire de Saisie en
+    # cours efface (c'est ce qui donnait l'impression que l'ecran
+    # "tremblait" et rendait la saisie difficile). La structure des onglets
+    # ne depend en realite que du role, fixe pour toute la session : on la
+    # construit donc une seule fois par connexion, dans une sortie separee
+    # (corps), avec reactive.isolate() pour que la lecture de ref() a
+    # l'interieur d'onglets(u) ne cree pas de dependance a _disque(). page()
+    # ne depend plus que de util() (connexion/deconnexion). Les donnees
+    # affichees a l'interieur des onglets (tableaux, soldes...) restent
+    # dans leurs propres sorties (b_table, v_table, m_apercu...), deja
+    # correctement isolees plus bas dans ce fichier, et continuent de se
+    # rafraichir normalement.
+    @render.ui
+    def corps():
+        u = req(util())
+        with reactive.isolate():
+            tabs = onglets(u)
+        return ui.navset_tab(*tabs, id="onglets")
 
     @render.ui
     def l_msg():
@@ -928,11 +966,25 @@ def server(input, output, session):
         rep_ids.set(ids + [nouveau])
 
     def _ligne_repartition_ui(rid, premiere):
-        nature_val = get_input(f"m_rep_nature_{rid}", "frais")
-        mois_defaut = get_input(f"m_rep_mois_{rid}", None)
-        if mois_defaut is None:
-            mois_defaut = _mois_suggere(nature_val, _code_tiers_saisi())
-        montant_val = get_input(f"m_rep_montant_{rid}", 0)
+        # Corrige le 10/09/2026 (quater) : ces trois get_input() (donc
+        # input[id]()) etaient lus sans isolate(), alors que cette fonction
+        # est appelee depuis m_bloc_repartition() - un @render.ui qui DEFINIT
+        # ces memes widgets. Consequence : m_bloc_repartition() dependait
+        # reactivement de m_rep_mois_*/m_rep_nature_*/m_rep_montant_* de
+        # TOUTES les lignes, donc modifier une seule ligne (meme apres
+        # update_on="blur" ci-dessous) reconstruisait tout le tableau,
+        # detruisant et recreant les <input> des AUTRES lignes non touchees.
+        # Isoler ces lectures les rend "lecture de la valeur actuelle a la
+        # construction" plutot que "dependance reactive" : m_bloc_repartition()
+        # ne se reconstruit plus que pour une vraie raison structurelle
+        # (ajout/suppression de ligne, changement de modele), jamais parce
+        # qu'une valeur a change dans une ligne existante.
+        with reactive.isolate():
+            nature_val = get_input(f"m_rep_nature_{rid}", "frais")
+            mois_defaut = get_input(f"m_rep_mois_{rid}", None)
+            montant_val = get_input(f"m_rep_montant_{rid}", 0)
+            if mois_defaut is None:
+                mois_defaut = _mois_suggere(nature_val, _code_tiers_saisi())
         suppr = ui.tags.td() if premiere else ui.tags.td(
             ui.input_action_link(f"m_rep_suppr_{rid}", "Retirer", class_="lien-etendre"))
         return ui.tags.tr(
@@ -942,8 +994,16 @@ def server(input, output, session):
                                         choices={"frais": "Frais", "avance": "Avance",
                                                  "solde": "Solde / Retard"},
                                         selected=nature_val)),
+            # update_on="blur" (10/09/2026, ter) : par defaut Shiny renvoie la
+            # valeur au serveur a chaque frappe, ce qui reconstruisait tout le
+            # panneau "Ecriture generee" (m_apercu/m_ruban, cf. plus bas) a
+            # chaque chiffre tape - signale par Afiya comme "ca bouge" pendant
+            # la saisie du montant. Avec "blur", la valeur n'est envoyee que
+            # lorsqu'on quitte le champ (tabulation ou clic ailleurs) : aucune
+            # perte fonctionnelle, juste un apercu qui se met a jour une fois
+            # le montant termine plutot qu'a chaque caractere.
             ui.tags.td(ui.input_numeric(f"m_rep_montant_{rid}", None, value=float(montant_val or 0),
-                                         min=0, step=500)),
+                                         min=0, step=500, update_on="blur")),
             suppr,
         )
 
@@ -1005,7 +1065,7 @@ def server(input, output, session):
     # l'apercu restait vide sans dire pourquoi. On remet le journal correct
     # et on explique, plutot que de laisser deviner.
     @reactive.effect
-    @reactive.event(input.m_journal)
+    @reactive.event(input.m_journal, ignore_init=True)
     def _garde_journal():
         m = md.modele_par_id(input.m_modele())
         if m is not None and m.get("journal") and input.m_journal() != m["journal"]:
@@ -1052,7 +1112,19 @@ def server(input, output, session):
     @render.ui
     def m_champs():
         m = md.modele_par_id(req(input.m_modele()))
-        r = ref()
+        # Corrige le 10/09/2026 : ref() etait lu directement ici, donc ce
+        # bloc (les champs Eleve/Compte/Montant... du formulaire de Saisie)
+        # se reconstruisait a chaque ecriture comptable ailleurs (meme
+        # cause que le correctif de page()/corps() plus haut) et effacait ce
+        # que l'utilisateur etait en train de taper ou de choisir - c'etait
+        # notamment le cas visible sur le champ "Eleve" en plein milieu
+        # d'une recherche. Isoler cette lecture est sans perte
+        # fonctionnelle : un tiers tape librement mais absent de la liste
+        # reste gere normalement a l'enregistrement (resoudre_tiers,
+        # cf. create=True plus bas) ; seule la fraicheur immediate de la
+        # liste proposee change, pas la possibilite de saisir.
+        with reactive.isolate():
+            r = ref()
         # "Ecriture libre" a deux jeux de champs possibles ; les autres
         # modeles n'en ont qu'un. resoudre_variante() choisit le bon selon le
         # journal deja affiche dans le selecteur au-dessus - lire
@@ -1164,7 +1236,17 @@ def server(input, output, session):
                                                 selected=defaut or md.MOIS_FR[date.today().month - 1]))
             elif t == "montant":
                 valeur = defaut if defaut not in (None, "") else ch.get("defaut") or 0
-                widgets.append(ui.input_numeric(id_, ch["l"], value=float(valeur), min=0, step=500))
+                # update_on="blur" (10/09/2026, ter) : par defaut Shiny renvoie
+                # la valeur au serveur a chaque frappe, ce qui reconstruisait
+                # tout le panneau "Ecriture generee" (m_apercu/m_ruban, cf.
+                # plus bas) a chaque chiffre tape - signale par Afiya comme
+                # "ca bouge" pendant la saisie du montant. Avec "blur", la
+                # valeur n'est envoyee que lorsqu'on quitte le champ
+                # (tabulation ou clic ailleurs) : aucune perte fonctionnelle,
+                # juste un apercu qui se met a jour une fois le montant
+                # termine plutot qu'a chaque caractere.
+                widgets.append(ui.input_numeric(id_, ch["l"], value=float(valeur), min=0, step=500,
+                                                 update_on="blur"))
             elif t == "oui_non":
                 widgets.append(ui.input_select(id_, ch["l"], choices={"oui": "Oui", "non": "Non"},
                                                 selected=defaut or "non"))
@@ -1192,7 +1274,16 @@ def server(input, output, session):
     @reactive.calc
     def valeurs():
         m = md.modele_par_id(req(input.m_modele()))
-        r = ref()
+        # Corrige le 10/09/2026 (ter) : ref() etait lu directement ici. Comme
+        # operation()/m_apercu()/m_ruban() dependent tous de valeurs(), toute
+        # ecriture enregistree ailleurs (sondage _disque(), 0,5 s) reconstruisait
+        # l'apercu "Ecriture generee" en entier meme sans rien y toucher - Afiya
+        # l'a signale comme "ca bouge" a l'ouverture et pendant la saisie du
+        # montant. Meme traitement que pour m_champs() : la lecture du
+        # referentiel est isolee, valeurs() reste reactif aux vrais
+        # changements (modele, journal, champs tapes).
+        with reactive.isolate():
+            r = ref()
         champs, _ = md.resoudre_variante(m, req(input.m_journal()), r)
         v = {}
         for ch in champs:
@@ -1233,7 +1324,9 @@ def server(input, output, session):
     def operation():
         req(input.m_modele(), input.m_journal())
         try:
-            return md.construire_operation(input.m_modele(), valeurs(), input.m_journal(), ref()["journaux"])
+            with reactive.isolate():
+                journaux = ref()["journaux"]
+            return md.construire_operation(input.m_modele(), valeurs(), input.m_journal(), journaux)
         except Exception:
             return None
 
@@ -1264,7 +1357,11 @@ def server(input, output, session):
         op = operation()
         if op is None:
             return ui.div({"class": "ruban att"}, "Renseignez l'operation : l'ecriture se construit ici.")
-        r = ref()
+        # Meme correctif que valeurs() ci-dessus : ne pas rendre m_apercu()
+        # dependant de _disque() (0,5 s), sinon tout l'apercu "Ecriture
+        # generee" se reconstruit en boucle pendant que la piece se remplit.
+        with reactive.isolate():
+            r = ref()
         morceaux = []
         for i, p in enumerate(op):
             ligne_j = r["journaux"].loc[r["journaux"]["journal"] == p["journal"], "intitule"]
@@ -1301,7 +1398,12 @@ def server(input, output, session):
         op = operation()
         if op is None:
             return None
-        r = ref()
+        # Meme correctif que m_apercu()/valeurs() : r et donnees() ne doivent
+        # pas rendre ce ruban dependant de _disque() (0,5 s) ni du sondage
+        # d'ecritures - seul un vrai changement de la piece en cours (modele,
+        # journal, champs) doit le reconstruire.
+        with reactive.isolate():
+            r = ref()
         if not equilibree():
             return ui.div({"class": "ruban ko"},
                            "L'operation n'est pas equilibree : elle ne peut pas etre enregistree.")
@@ -1432,6 +1534,22 @@ def server(input, output, session):
                 ui.update_text(id_, value="")
             elif ch["t"] == "choix" and ch.get("options"):
                 ui.update_select(id_, selected=next(iter(ch["options"])))
+            elif ch["t"] == "repartition":
+                # "Vider" ne remettait jamais a zero le tableau de
+                # repartition (mois/nature/montant du modele Encaissement) :
+                # ni les lignes ajoutees via "+ Ajouter un mois" (rep_ids)
+                # ni les widgets m_rep_mois_1/m_rep_nature_1/m_rep_montant_1
+                # de la premiere ligne (jamais retiree) n'etaient touches -
+                # Frais/Avance/Solde et leurs montants restaient affiches
+                # tels quels apres Vider, et le restaient tant que la
+                # session restait ouverte. On revient explicitement a
+                # l'etat d'une ligne 1 neuve : seule ligne, nature "frais",
+                # mois suggere pour "frais" (mois en cours), montant 0.
+                rep_ids.set([1])
+                rep_prochain_id.set(2)
+                ui.update_select("m_rep_nature_1", selected="frais")
+                ui.update_select("m_rep_mois_1", selected=_mois_suggere("frais", ""))
+                ui.update_numeric("m_rep_montant_1", value=0)
 
     @reactive.effect
     @reactive.event(input.m_vider)
@@ -1657,6 +1775,14 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.v_valider)
     def _valider():
+        # Filet de securite cote serveur : v_valider n'est boutonne qu'a
+        # l'ecran pour le comptable, mais un input Shiny reste positionnable
+        # par n'importe quel client de la session (masquer un widget n'est
+        # pas un controle d'acces) - la verification du role doit donc etre
+        # refaite ici, jamais seulement dans onglets()/onglet_validation().
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         sel = v_table.data_view(selected=True)
         if len(sel) == 0 or "Message" in sel.columns:
             ui.notification_show("Aucune piece choisie.", type="warning")
@@ -1684,6 +1810,11 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.v_rejeter)
     def _rejeter():
+        # Meme filet de securite que _valider (voir son commentaire) :
+        # v_rejeter est aussi un bouton reserve au comptable a l'ecran.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         sel = v_table.data_view(selected=True)
         if len(sel) == 0 or "Message" in sel.columns:
             ui.notification_show("Aucune piece choisie.", type="warning")
@@ -1734,13 +1865,22 @@ def server(input, output, session):
             return render.DataGrid(pd.DataFrame({"Message": ["Rien a exporter."]}), selection_mode="none")
         return render.DataGrid(x, selection_mode="none", width="100%", filters=True)
 
-    @render.download_button(filename=lambda: f"sage_{date.today().strftime('%Y%m%d')}.txt", encoding="latin1")
+    @render.download_button(filename=lambda: f"sage_{date.today().strftime('%Y%m%d')}.txt", encoding="cp1252")
     def e_txt():
         x = dl.format_sage(a_exporter(), ref())
         if x is None:
             yield ""
             return
-        yield x.to_csv(sep=";", index=False, header=False, lineterminator="\n", na_rep="")
+        texte = x.to_csv(sep=";", index=False, header=False, lineterminator="\n", na_rep="")
+        # Corrige le 10/09/2026 : cp1252 (au lieu de latin1) couvre en plus
+        # "oe", les guillemets typographiques et le tiret cadratin ; et on
+        # encode nous-memes avec errors="replace" plutot que de laisser
+        # @render.download_button faire chunk.encode(encoding) sans filet -
+        # Shiny transmet un chunk deja en bytes tel quel, sans le reencoder,
+        # donc un caractere malgre tout hors cp1252 devient "?" au lieu de
+        # faire planter (UnicodeEncodeError) le telechargement de tout le lot
+        # de pieces selectionne.
+        yield texte.encode("cp1252", errors="replace")
 
     @render.download_button(
         filename=lambda: f"sage_{date.today().strftime('%Y%m%d')}.xlsx",
@@ -1756,6 +1896,11 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.e_marquer)
     def _marquer():
+        # Meme filet de securite que _valider : l'export vers Sage est
+        # reserve au comptable a l'ecran (onglet_export), a reverifier ici.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         d = a_exporter()
         if len(d) == 0:
             return
@@ -1811,6 +1956,9 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.c_reparer)
     def _reparer():
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         crees = dl.reparer_tiers_manquants(donnees(), ref())
         ui.notification_show(
             f"{len(crees)} tiers recree(s)" if crees else "Aucun tiers a recreer",
@@ -2023,6 +2171,13 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_ajouter_utilisateur)
     def _ajouter_utilisateur():
+        # Le panneau de creation d'utilisateur n'est rendu qu'au comptable
+        # (onglet_referentiel) ; meme filet de securite cote serveur que
+        # _valider - sans lui, n'importe quel compte "saisie" pourrait se
+        # creer un acces "validation" sur n'importe quel centre.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         # Un clic sur un formulaire deja vide (par exemple un deuxieme clic
         # apres une creation reussie, le formulaire n'ayant pas encore ete
         # retape) ne doit produire aucun message : ce n'est pas une erreur de
@@ -2049,6 +2204,10 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_desactiver_utilisateur)
     def _desactiver_utilisateur():
+        # Meme filet de securite que _ajouter_utilisateur.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         sel = r_utilisateurs.data_view(selected=True)
         if len(sel) == 0:
             ui.notification_show("Choisir d'abord un utilisateur.", type="warning")
@@ -2067,6 +2226,11 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_ajouter)
     def _ajouter_tiers():
+        # Le panneau "Comptes de tiers" n'est rendu qu'au comptable ; meme
+        # filet de securite cote serveur que _valider.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         if not str(input.r_code() or "").strip():
             return
         ui.update_action_button("r_ajouter", disabled=True)
@@ -2086,6 +2250,11 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_ajouter_compte)
     def _ajouter_compte():
+        # Le panneau "Plan de comptes" n'est rendu qu'au comptable ; meme
+        # filet de securite cote serveur que _valider.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         if not str(input.r_num_compte() or "").strip():
             return
         ui.update_action_button("r_ajouter_compte", disabled=True)
@@ -2107,20 +2276,43 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_soldes)
     def _soldes():
+        # Le panneau "Soldes d'ouverture" n'est rendu qu'au comptable ; meme
+        # filet de securite cote serveur que _valider.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
+        echecs = []
         for j in ref()["journaux"]["journal"]:
             v = get_input(_id_journal(j))
             if v is not None:
                 try:
                     dl.maj_solde_ouverture(j, v)
-                except Exception:
-                    pass
-        ui.notification_show("Soldes d'ouverture enregistres", type="message")
+                except Exception as e:
+                    dl.logger.error("Echec de mise a jour du solde d'ouverture (journal %s) : %s", j, e)
+                    echecs.append(j)
+        # Corrige le 10/09/2026 : l'echec etait avale (`except Exception:
+        # pass`) et "Soldes d'ouverture enregistres" s'affichait quand meme,
+        # meme si aucun solde n'avait ete ecrit - le comptable croyait avoir
+        # corrige un solde reste faux, avec un effet direct sur les controles
+        # de solde de caisse (controler_soldes) qui en dependent. Desormais
+        # un echec est nomme et ne peut plus etre confondu avec un succes.
+        if echecs:
+            ui.notification_show(
+                "Echec sur : " + ", ".join(echecs) + ". Les autres soldes ont ete "
+                "enregistres ; corrigez et reessayez pour ceux en echec.", type="error")
+        else:
+            ui.notification_show("Soldes d'ouverture enregistres", type="message")
         panneau_ouvert.set(None)
         rafraichir()
 
     @reactive.effect
     @reactive.event(input.r_nouvelle_annee)
     def _nouvelle_annee():
+        # Le panneau "Nouvelle annee academique" n'est rendu qu'au
+        # comptable ; meme filet de securite cote serveur que _valider.
+        if not est_comptable():
+            ui.notification_show("Action reservee au comptable.", type="error")
+            return
         n = dl.nouvelle_annee_academique()
         panneau_ouvert.set(None)
         ui.notification_show(
