@@ -1,0 +1,24 @@
+-- ---------------------------------------------------------------------------
+-- Migration : suppression de centres.code_acces (colonne morte)
+--
+-- A appliquer UNE SEULE FOIS sur Hakili_compta (la base deja en service),
+-- avant de deployer le code corrige. sql/schema.sql a deja ete mis a jour
+-- pour qu'une base neuve (ex. poste de developpement) recree directement le
+-- bon schema ; ce fichier ne sert qu'a mettre a niveau une base existante.
+--
+-- Pourquoi : centres.code_acces n'est lu par aucune fonction du code
+-- applicatif actuel (verifie par recherche exhaustive dans app.py,
+-- logic/*.py, mcp_server/*) - la connexion ne s'appuie que sur
+-- utilisateurs.code_acces, un code personnel par personne, hache bcrypt.
+-- Cette colonne etait un reliquat d'un modele anterieur (code de centre
+-- partage), restee en base en clair avec des valeurs a 4 chiffres
+-- ('1111'...'9999', voir l'ancien sql/seed.sql). Elle ne represente pas une
+-- faille active (rien ne la lit), mais un risque de confusion pour un futur
+-- developpeur qui la reutiliserait "parce qu'elle existe deja", en clair,
+-- sans repasser par la meme hachage que utilisateurs.code_acces.
+--
+-- Usage (depuis la racine du projet, avec les identifiants de Hakili_compta) :
+--   psql "$DATABASE_URL" -f sql/migrations/2026-09-10_suppression_code_acces_centres.sql
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE centres DROP COLUMN IF EXISTS code_acces;

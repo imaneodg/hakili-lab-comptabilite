@@ -9,18 +9,77 @@
 # et la fonction lignes(). Rien d'autre a modifier dans l'application.
 #
 # Champs disponibles : "tiers", "compte", "libelle", "texte", "montant",
-#                      "mois", "oui_non"
+#                      "mois", "oui_non", "choix", "repartition" (pas un
+#                      widget simple : plusieurs lignes mois/nature/montant
+#                      construites dynamiquement par l'interface, cf.
+#                      "encaissement" et app.py/m_bloc_repartition)
 #
 # Port Python (depuis R/modeles.R) : 13 modeles, memes comptes, meme
 # traduction debit/credit.
 # ---------------------------------------------------------------------------
 
+import logging
 import re
 
 import pandas as pd
 
+# Journal des echecs de construction de ligne (voir construire_lignes,
+# ajoute le 10/09/2026) - meme processus que logic.donnees, un seul
+# logging.basicConfig au point d'entree (app.py / mcp_server) configure les
+# handlers pour tous les loggers "hakili.*".
+logger = logging.getLogger("hakili.modeles")
+
 MOIS_FR = ["JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN", "JUILLET",
            "AOUT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE"]
+
+# Longueur maximale d'un libelle applique par ligne() ci-dessous - purement
+# une convention applicative (ecritures.libelle est un `text` Postgres sans
+# limite), reprise ici pour que les fonctions qui composent un libelle avec
+# un suffixe "/MOIS" (voir _libelle_avec_mois) puissent reserver la place du
+# suffixe sans dupliquer le nombre en dur.
+LIBELLE_MAX = 60
+
+# Libelle complet (spec 2026) selon la nature d'une ligne de reglement du
+# formulaire "encaissement" - utilise par _libelle_frais_ca(), qui compose
+# "BASE DE MOIS - NOM".
+LIBELLES_NATURE_CA = {
+    "frais": "FRAIS DE COURS D'APPUI",
+    "avance": "AVANCE DE FRAIS DE COURS D'APPUI",
+    "solde": "RATTRAPAGE DE FRAIS DE COURS D'APPUI",
+}
+
+# Mois dont le nom commence par une voyelle : elision ("D'AVRIL", jamais
+# "DE AVRIL").
+MOIS_AVEC_ELISION = ("AVRIL", "AOUT", "OCTOBRE")
+
+
+# Retrouve le mois cite dans un libelle, qu'il suive l'ancien format
+# ("PREFIXE NOM/MOIS", suffixe teste en premier pour les pieces deja
+# enregistrees) ou le nouveau ("BASE DE MOIS - NOM" / "BASE D'MOIS - NOM",
+# voir _libelle_frais_ca). Sert a suggerer, jamais a imposer, le mois
+# suivant d'une avance a partir du dernier mouvement connu d'un tiers -
+# None si aucun des deux formats ne cite un mois reconnu (saisie libre,
+# etc.), auquel cas l'appelant retombe sur un autre defaut.
+def mois_depuis_libelle(libelle):
+    s = str(libelle or "").upper()
+    m = re.search(r"/([A-ZÀ-Ü]+)\s*$", s)
+    if m and m.group(1) in MOIS_FR:
+        return m.group(1)
+    # "DE MOIS" / "D'MOIS" : plusieurs segments "DE ..."/"D'..." peuvent
+    # apparaitre avant le vrai mois (ex. "D'APPUI" dans la base du libelle),
+    # d'ou finditer() plutot que search() - seul le mois reconnu compte.
+    for m in re.finditer(r"\bD['’]([A-ZÀ-Ü]+)\b|\bDE\s+([A-ZÀ-Ü]+)\b", s):
+        mois = m.group(1) or m.group(2)
+        if mois in MOIS_FR:
+            return mois
+    return None
+
+
+# Mois suivant dans le cycle calendaire (decembre boucle sur janvier).
+def mois_suivant(mois):
+    if mois not in MOIS_FR:
+        return MOIS_FR[0]
+    return MOIS_FR[(MOIS_FR.index(mois) + 1) % 12]
 
 
 # Ramene une valeur d'entree a une seule valeur exploitable.
@@ -46,14 +105,99 @@ def ligne(compte, libelle, debit=0, credit=0, code_tiers=""):
     return {
         "compte": str(un(compte)),
         "code_tiers": str(un(code_tiers)),
-        "libelle": str(un(libelle))[:60].upper(),
+        "libelle": str(un(libelle))[:LIBELLE_MAX].upper(),
         "debit": float(un(debit, 0) or 0),
         "credit": float(un(credit, 0) or 0),
     }
 
 
+# Compose "PREFIXE NOM/MOIS" en tronquant NOM (jamais le suffixe "/MOIS") si
+# le total depasse LIBELLE_MAX - corrige le 10/09/2026 : avant, c'etait le
+# libelle final deja compose qui etait tronque a 60 caracteres par ligne()
+# ci-dessus, ce qui coupait le plus souvent la fin "/MOIS" (la partie la
+# plus a droite, donc la plus exposee, notamment avec un nom d'eleve compose
+# un peu long). mois_depuis_libelle() ne reconnaissant alors plus le mois,
+# la suggestion automatique du mois suivant d'une avance redevenait
+# silencieusement le mois du jour - un confort perdu sans aucune erreur pour
+# le signaler.
+def _libelle_avec_mois(prefixe, nom, mois):
+    nom = str(un(nom, "")).strip()
+    suffixe = f"/{mois}"
+    place_pour_nom = max(0, LIBELLE_MAX - len(prefixe) - 1 - len(suffixe))
+    return f"{prefixe} {nom[:place_pour_nom]}{suffixe}"
+
+
+# "DE JANVIER" / "D'AVRIL" - elision devant un mois qui commence par une voyelle.
+def _de_mois(mois):
+    mois = str(un(mois, "")).strip().upper()
+    if mois in MOIS_AVEC_ELISION:
+        return f"D'{mois}"
+    return f"DE {mois}"
+
+
+# Libelle complet "BASE DE MOIS - NOM" d'une ligne de reglement du
+# formulaire "encaissement" (spec 2026), partage a l'identique par la
+# ligne de caisse et la ligne 411 d'un encaissement a une seule operation -
+# voir _lignes_encaissement. Le mois se place avant le nom (jamais apres,
+# contrairement a _libelle_avec_mois) : un nom de tiers long tronque par
+# ligne() a LIBELLE_MAX n'ampute donc jamais la nature/le mois de
+# l'operation, seulement la fin du nom.
+def _libelle_frais_ca(nature, mois, nom):
+    base = LIBELLES_NATURE_CA.get(nature, LIBELLES_NATURE_CA["frais"])
+    libelle = f"{base} {_de_mois(mois)}"
+    nom = str(un(nom, "")).strip()
+    if nom:
+        libelle = f"{libelle} - {nom}"
+    return libelle
+
+
 def _df(*lignes_):
     return pd.DataFrame(list(lignes_))
+
+
+def _libelle_transfert(v):
+    """Le libelle tape par le caissier s'il en a saisi un, sinon un libelle
+    compose automatiquement.
+
+    Le champ est facultatif et c'est voulu : la caissiere de Tampouy ecrit
+    "CONTRIBUTION SIAO", celle de Saaba "APPROV SIAO", et les deux parlent de
+    la meme remise - les brouillards 2026 le montrent. Lui imposer un libelle
+    unique reviendrait a lui faire traduire son vocabulaire ; la laisser ecrire
+    le sien ne coute rien, parce que le rapprochement ne lit JAMAIS le libelle.
+    Il travaille sur la reference et sur les deux centres, qui sont des
+    donnees, pas du texte libre.
+
+    Le libelle compose par defaut ("TRANSFERT PIS>SIA") utilise les codes a
+    trois lettres : c'est un libelle comptable destine a l'export Sage, ou la
+    place est comptee (60 caracteres). Jamais un texte montre a l'ecran - les
+    centres s'y affichent toujours en toutes lettres (voir
+    donnees.nom_centre)."""
+    saisi = str(un(v.get("libelle"), "")).strip()
+    if saisi:
+        return saisi
+    donateur = str(un(v.get("centre_donateur"), "")).strip().upper()
+    destinataire = str(un(v.get("centre_destinataire"), "")).strip().upper()
+    return f"TRANSFERT {donateur}>{destinataire}"
+
+
+def _lignes_transfert(v, cc):
+    """Une seule face, celle du centre qui saisit - jamais les deux.
+
+    `v["mon_centre"]` est pose par l'application a partir de l'utilisateur
+    connecte. Sortie : la caisse est creditee, le compte de passage debite.
+    Entree : l'inverse. Le compte de passage revient a zero quand les deux
+    faces existent, ce qui est exactement la definition d'un transfert
+    termine."""
+    mien = str(un(v.get("mon_centre"), "")).strip()
+    donateur = str(un(v.get("centre_donateur"), "")).strip()
+    montant = v.get("montant")
+    if not mien or not donateur or not montant:
+        return None
+    if mien == donateur:
+        return _df(ligne(COMPTE_VIREMENTS_FONDS, v["lib"], debit=montant),
+                   ligne(cc, v["lib"], credit=montant))
+    return _df(ligne(cc, v["lib"], debit=montant),
+               ligne(COMPTE_VIREMENTS_FONDS, v["lib"], credit=montant))
 
 
 # Compte d'attente (SYSCOHADA) : pivot systematique de "Ecriture libre" sur
@@ -63,24 +207,48 @@ def _df(*lignes_):
 # donnees.py qui signale toute piece qui le touche.
 COMPTE_ATTENTE = "471000"
 
+# --- transferts internes entre centres ---------------------------------------
+#
+# Compte SYSCOHADA 585 "Virements de fonds" : compte de passage de tout
+# mouvement d'argent d'une caisse a une autre. Deja present dans le plan Sage
+# de HAKILISSO et deja utilise par la comptable pour les remises au centre
+# SIAO. Voir sql/migrations/2026-09-12_transferts_internes.sql pour le
+# raisonnement complet et les comptes ecartes.
+COMPTE_VIREMENTS_FONDS = "585000"
+
+# Centre propose par defaut comme destinataire d'un transfert. C'est une regle
+# de gestion actuelle, pas une contrainte : les deux centres restent
+# selectionnables dans le formulaire, precisement pour que l'application
+# survive a un changement de decision de la direction. La changer ici suffit.
+CENTRE_DESTINATAIRE_PAR_DEFAUT = "SIA"
+
 
 MODELES = [
 
     {
+        # Fusionne l'ancien "Encaissement de frais" et l'ancienne "Avance de
+        # paiement (plusieurs mois)" en un seul formulaire (spec 2026) : la
+        # caissiere tape un montant total recu puis le repartit sur un ou
+        # plusieurs mois (Frais / Avance / Solde-retard), champ "repartition"
+        # rendu et gere dynamiquement par app.py (m_bloc_repartition). Le
+        # mode simple (une seule ligne "Frais", mois en cours) se comporte
+        # exactement comme l'ancien formulaire dedie.
         "id": "encaissement",
         "titre": "Encaissement de frais de scolarite",
-        "aide": "53 % des pieces de 2024-2025",
+        "aide": "Reglement eleve : frais du mois, avance, ou rattrapage d'un mois passe",
         "journal": "CP",
         "champs": [
-            {"n": "tiers", "l": "Eleve (compte 411)", "t": "tiers", "pref": "411", "collectif": "411000"},
-            {"n": "mois", "l": "Mois concerne", "t": "mois"},
-            {"n": "montant", "l": "Montant recu", "t": "montant"},
+            {"n": "tiers", "l": "Eleve (compte 411)", "t": "tiers", "pref": "411", "collectif": "411000",
+             "historique": True},
+            {"n": "montant", "l": "Montant total recu", "t": "montant"},
+            {"n": "repartition", "l": "Repartition", "t": "repartition"},
         ],
-        "libelle": lambda v: f"FRAIS CA {v.get('tiers_nom', '')}/{v.get('mois', '')}",
-        "lignes": lambda v, cc: _df(
-            ligne(cc, v["lib"], debit=v["montant"]),
-            ligne("411000", v["lib"], credit=v["montant"], code_tiers=v.get("tiers", "")),
-        ),
+        # Libelle de la ligne de caisse pour un encaissement multi-operations
+        # (voir _lignes_encaissement) : pas de mois ici, une seule ligne ne
+        # peut pas resumer plusieurs mois/natures a la fois - le mois reste
+        # precise sur chaque ligne 411 de detail.
+        "libelle": lambda v: f"FRAIS DE COURS D'APPUI - {v.get('tiers_nom', '')}",
+        "lignes": lambda v, cc: _lignes_encaissement(v, cc),
     },
 
     {
@@ -97,6 +265,28 @@ MODELES = [
             ligne(cc, v["lib"], debit=v["montant"]),
             ligne("707810", v["lib"], credit=v["montant"]),
         ),
+    },
+
+    {
+        # Remplace par le mode multi-lignes du modele "encaissement"
+        # ci-dessus (spec 2026). "retire" le sort du selecteur de saisie
+        # (voir _modeles_groupes dans app.py) sans le retirer de MODELES :
+        # modele_par_id() continue de le resoudre pour les pieces deja
+        # enregistrees sous cet identifiant (correction, historique).
+        "id": "avance_paiement_multimois",
+        "retire": True,
+        "titre": "Avance de paiement (plusieurs mois) [retire, voir Encaissement]",
+        "aide": "Un paiement recu en une fois qui couvre plusieurs mois de frais",
+        "journal": "CP",
+        "champs": [
+            {"n": "tiers", "l": "Eleve (compte 411)", "t": "tiers", "pref": "411", "collectif": "411000"},
+            {"n": "montant", "l": "Montant total recu", "t": "montant"},
+            {"n": "mois", "l": "Premier mois couvert", "t": "mois"},
+            {"n": "nb_mois", "l": "Nombre de mois couverts", "t": "choix",
+             "options": {"2": "2 mois", "3": "3 mois", "4": "4 mois", "5": "5 mois", "6": "6 mois"}},
+        ],
+        "libelle": lambda v: f"FRAIS CA {v.get('tiers_nom', '')}",
+        "lignes": lambda v, cc: _lignes_avance_paiement(v, cc),
     },
 
     {
@@ -133,7 +323,7 @@ MODELES = [
         # sortis de CP contre 258 M entres en CMD + banque, a 0,4 % pres) ;
         # l'application les produit desormais ensemble, ce qui est la seule
         # facon pour le compte pivot 585000 de se solder a zero.
-        "lie": "BDU-BF",
+        "lie": "Banque",
         "champs": [
             {"n": "montant", "l": "Montant verse", "t": "montant"},
             {"n": "timbre", "l": "Timbre (646200)", "t": "montant", "defaut": 50},
@@ -149,6 +339,46 @@ MODELES = [
             _df(ligne(cc, v["lib"], debit=v["montant"]),
                 ligne("585000", v["lib"], credit=v["montant"]))
         ),
+    },
+
+    {
+        # Un centre remet des especes a un autre centre - le cas courant etant
+        # le depot au centre SIAO, qui paie ensuite pour le compte de tous.
+        #
+        # Il n'y a PAS de champ "sens", volontairement : le sens se deduit de
+        # qui saisit (voir logic.donnees._metadonnees_transfert). Le caissier
+        # designe simplement le centre donateur et le centre destinataire, l'un
+        # des deux etant le sien. C'est plus proche de la facon dont il pense
+        # l'operation ("Pissy remet a SIAO") qu'un choix Entree/Sortie, et cela
+        # ferme la porte a l'erreur classique : enregistrer une entree alors
+        # qu'on a fait une sortie.
+        #
+        # Il n'y a PAS non plus d'operation liee ("lie") : une piece liee est
+        # produite par une seule saisie, dans un seul centre, ce qui ferait
+        # ecrire un centre dans les livres d'un autre - exactement le
+        # cloisonnement durci le 11/09/2026. Et l'argent met parfois des
+        # semaines a arriver (les brouillards montrent une remise de janvier
+        # enregistree le 20 fevrier) : chaque centre enregistre donc son propre
+        # mouvement, le jour ou il a lieu, et le rapprochement verifie ensuite
+        # que les deux faces se repondent (voir analyse.transferts_internes).
+        #
+        # "journal": None - un transfert peut partir de la caisse principale,
+        # de la caisse menues depenses ou de la banque. Les brouillards reels
+        # montrent des remises au SIAO depuis CP comme depuis CMD.
+        "id": "transfert_interne",
+        "titre": "Transfert entre centres",
+        "aide": "Remise d'especes d'un centre a un autre - ni recette ni depense",
+        "journal": None,
+        "champs": [
+            {"n": "centre_donateur", "l": "Centre qui remet l'argent", "t": "centre",
+             "defaut_centre": "mien"},
+            {"n": "centre_destinataire", "l": "Centre qui recoit l'argent", "t": "centre",
+             "defaut_centre": CENTRE_DESTINATAIRE_PAR_DEFAUT},
+            {"n": "montant", "l": "Montant", "t": "montant"},
+            {"n": "libelle", "l": "Libelle (facultatif)", "t": "libelle"},
+        ],
+        "libelle": lambda v: _libelle_transfert(v),
+        "lignes": lambda v, cc: _lignes_transfert(v, cc),
     },
 
     {
@@ -214,17 +444,21 @@ MODELES = [
         ),
     },
 
-    # --- journal BDU-BF (banque) ------------------------------------------
-    # Les deux modeles ci-dessous reprennent ce que l'historique montre du
-    # journal de banque : 52 % de reglements fournisseurs et 21 % de versements
-    # d'especes (deja couverts par le modele precedent), puis les frais
-    # bancaires et les reglements d'impots et de retenues.
+    # --- journal Banque (compte CBI) ---------------------------------------
+    # Les deux modeles ci-dessous reprennent ce que l'historique de l'ancien
+    # journal de banque (BDU-BF, retire le 11/09/2026 lors du changement
+    # d'etablissement - voir sql/migrations/2026-09-11_*) montrait : 52 % de
+    # reglements fournisseurs et 21 % de versements d'especes (deja couverts
+    # par le modele precedent), puis les frais bancaires et les reglements
+    # d'impots et de retenues. Le code de journal "Banque" est stable et ne
+    # depend d'aucun etablissement en particulier (voir sql/schema.sql) :
+    # seul intitule/prefixe_piece changeraient si la banque change encore.
 
     {
         "id": "fournisseur_banque",
         "titre": "Reglement d'un fournisseur par banque",
         "aide": "Virement ou cheque - 52 % des pieces de banque",
-        "journal": "BDU-BF",
+        "journal": "Banque",
         "champs": [
             {"n": "tiers", "l": "Fournisseur (compte 401)", "t": "tiers", "pref": "401", "collectif": "401000"},
             {"n": "libelle", "l": "Libelle de l'operation", "t": "libelle"},
@@ -241,7 +475,7 @@ MODELES = [
         "id": "frais_bancaires",
         "titre": "Frais bancaires ou reglement d'impot",
         "aide": "Agios, commissions, IUTS, IRF, TPA",
-        "journal": "BDU-BF",
+        "journal": "Banque",
         "champs": [
             # Liste courte et fermee : ce sont les seuls comptes que le journal
             # de banque utilise en dehors des fournisseurs et des versements.
@@ -338,7 +572,7 @@ MODELES = [
         # jamais besoin de savoir qu'il existe deux variantes en dessous, et
         # jamais de mot technique (debit/credit) dans aucune des deux.
         #
-        # Sur caisse/banque (CP, CMD, BDU-BF) : le compte de caisse est
+        # Sur caisse/banque (CP, CMD, Banque) : le compte de caisse est
         # calcule automatiquement via cc, exactement comme pour tous les
         # autres modeles de ces journaux - jamais choisi a la main.
         #
@@ -434,6 +668,70 @@ def _lignes_achat(v):
     return L
 
 
+# Genere la piece du formulaire "encaissement" (mode multi-mois) : une
+# ligne de caisse (debit = montant total recu) et une ligne 411000 par
+# entree de repartition (credit), libellee selon sa nature. Ne fait aucun
+# controle d'equilibre lui-meme - si la somme des lignes ne vaut pas le
+# montant total, la piece renvoyee est simplement desequilibree, et
+# operation_equilibree() (deja generique) le signale comme pour tout autre
+# modele : aucune logique de controle dupliquee ici.
+#
+# Libelle de la ligne de caisse (spec 2026) : identique au libelle complet
+# de l'unique ligne 411 pour un encaissement a une seule operation (le cas
+# le plus frequent - le comptable doit lire le meme texte des deux cotes).
+# Quand plusieurs operations sont regroupees en un seul reglement (frais +
+# avance, par exemple), aucun texte unique ne peut resumer plusieurs mois/
+# natures a la fois : la ligne de caisse garde alors le libelle global
+# "FRAIS DE COURS D'APPUI - NOM" (v["lib"], voir le modele "encaissement"
+# ci-dessus), sans mois - il reste precise sur chaque ligne 411 de detail.
+def _lignes_encaissement(v, cc):
+    montant_total = float(un(v.get("montant"), 0) or 0)
+    if montant_total <= 0:
+        return None
+    repartition = [row for row in (v.get("repartition") or [])
+                   if float(un(row.get("montant"), 0) or 0) > 0 and str(un(row.get("mois"), "")).strip()]
+    lignes_411 = []
+    for row in repartition:
+        montant = float(un(row.get("montant"), 0) or 0)
+        mois = str(un(row.get("mois"), "")).strip()
+        libelle = _libelle_frais_ca(row.get("nature"), mois, v.get("tiers_nom", ""))
+        lignes_411.append(ligne("411000", libelle, credit=montant, code_tiers=v.get("tiers", "")))
+    if not lignes_411:
+        return None
+    lib_caisse = lignes_411[0]["libelle"] if len(lignes_411) == 1 else v["lib"]
+    return _df(ligne(cc, lib_caisse, debit=montant_total), *lignes_411)
+
+
+def _lignes_avance_paiement(v, cc):
+    montant_total = float(v["montant"])
+    if montant_total <= 0:
+        return None
+    try:
+        nb = int(v.get("nb_mois") or 2)
+    except (TypeError, ValueError):
+        nb = 2
+    if nb < 1:
+        return None
+
+    mois_depart = v.get("mois") or MOIS_FR[0]
+    idx_depart = MOIS_FR.index(mois_depart) if mois_depart in MOIS_FR else 0
+
+    montant_mensuel = round(montant_total / nb)
+    lignes_mensuelles = []
+    reparti = 0
+    for i in range(nb):
+        dernier = (i == nb - 1)
+        m = montant_total - reparti if dernier else montant_mensuel
+        reparti += m
+        mois_nom = MOIS_FR[(idx_depart + i) % 12]
+        lignes_mensuelles.append(
+            ligne("411000", _libelle_avec_mois("AVANCE", v["lib"], mois_nom),
+                  credit=m, code_tiers=v.get("tiers", ""))
+        )
+
+    return _df(ligne(cc, v["lib"], debit=montant_total), *lignes_mensuelles)
+
+
 def _lignes_fournisseur(v, cc):
     L = _df(ligne("401000", v["lib"], debit=v["montant"], code_tiers=v.get("tiers", "")))
     if v["timbre"] > 0:
@@ -509,6 +807,11 @@ def construire_lignes(id_modele, valeurs, journal, journaux_ref):
     for ch in champs:
         if ch["t"] == "montant":
             v[ch["n"]] = float(un(v.get(ch["n"]), 0) or 0)
+        elif ch["t"] == "repartition":
+            # Deja une liste de {"mois", "nature", "montant"} construite par
+            # l'interface (une entree par mois reparti) : un() la reduirait
+            # a tort a un seul element, ne pas l'y faire passer.
+            v[ch["n"]] = v.get(ch["n"]) or []
         else:
             v[ch["n"]] = str(un(v.get(ch["n"]), ""))
 
@@ -533,6 +836,12 @@ def construire_lignes(id_modele, valeurs, journal, journaux_ref):
     try:
         L = fn_lignes(v, cc)
     except Exception:
+        # Corrige le 10/09/2026 : cette exception etait totalement avalee -
+        # l'utilisateur voyait juste "Renseignez l'operation", indiscernable
+        # d'un formulaire simplement incomplet, et rien n'indiquait qu'un
+        # modele etait casse. Le comportement fonctionnel ne change pas
+        # (toujours None), mais l'incident devient diagnosticable.
+        logger.exception("Echec de construction des lignes (modele=%s, journal=%s)", id_modele, journal)
         return None
     if L is None or len(L) == 0:
         return None

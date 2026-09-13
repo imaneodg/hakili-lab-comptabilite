@@ -40,23 +40,59 @@ CREATE TABLE IF NOT EXISTS libelles_types (
 );
 CREATE INDEX IF NOT EXISTS idx_libelles_compte ON libelles_types(compte);
 
+-- caisse_physique distingue une caisse en especes reellement detenue par un
+-- centre (CP, CMD - chacun des cinq centres a son propre tiroir-caisse) d'un
+-- compte partage entre tous les centres (la banque) : c'est ce qui decide si
+-- un solde d'ouverture se ventile par centre (table soldes_ouverture_centre
+-- ci-dessous) ou reste unique (solde_ouverture ci-dessous). actif retire un
+-- journal de la circulation (ancienne banque apres changement d'etablissement,
+-- par exemple) sans jamais toucher a son historique : les ecritures qui le
+-- referencent restent intactes et consultables, seule la creation de
+-- nouvelles pieces sur ce journal n'est plus proposee.
 CREATE TABLE IF NOT EXISTS journaux (
     journal              text PRIMARY KEY,
     intitule              text NOT NULL,
     compte_contrepartie   text REFERENCES comptes(compte),
     type                  text NOT NULL DEFAULT 'tresorerie' CHECK (type IN ('tresorerie', 'operations')),
     prefixe_piece         text NOT NULL,
+    -- Solde d'ouverture global : n'a de sens que pour un journal qui n'est
+    -- pas une caisse physique (la banque). Pour CP/CMD, le solde reel se lit
+    -- desormais dans soldes_ouverture_centre - cette colonne y reste a titre
+    -- de compatibilite mais n'est plus lue pour eux.
     solde_ouverture       numeric(14, 2) NOT NULL DEFAULT 0,
+    caisse_physique       text NOT NULL DEFAULT 'non' CHECK (caisse_physique IN ('oui', 'non')),
+    actif                 text NOT NULL DEFAULT 'oui' CHECK (actif IN ('oui', 'non')),
     updated_at            timestamptz NOT NULL DEFAULT now()
 );
 
+-- Pas de code_acces ici (retire le 10/09/2026, voir
+-- sql/migrations/2026-09-10_suppression_code_acces_centres.sql) : la
+-- connexion ne s'appuie que sur utilisateurs.code_acces (un code personnel
+-- par personne, hache bcrypt) - un code de centre partage n'a jamais ete lu
+-- par le code applicatif, mais restait en base en clair, ce qui aurait pu
+-- induire en erreur ou etre reutilise par erreur plus tard.
 CREATE TABLE IF NOT EXISTS centres (
     code_centre          text PRIMARY KEY,
     intitule              text NOT NULL,
     section_analytique    text NOT NULL,
     actif                 text NOT NULL DEFAULT 'oui' CHECK (actif IN ('oui', 'non')),
-    code_acces            text NOT NULL,
     updated_at            timestamptz NOT NULL DEFAULT now()
+);
+
+-- Solde d'ouverture d'une caisse physique (CP, CMD), par centre : chacun des
+-- cinq centres a sa propre caisse reelle, donc son propre encaisse de
+-- depart - un seul solde_ouverture par journal (ci-dessus) melangeait a tort
+-- les cinq tiroirs-caisses en un seul chiffre, ce qui faussait le solde
+-- affiche a chaque centre et pouvait masquer une caisse reellement a sec
+-- pendant qu'une autre etait excedentaire (voir sql/migrations/2026-09-11_*).
+-- Ne concerne jamais un journal ou caisse_physique = 'non' (la banque) : ce
+-- compte est unique et partage, son solde reste dans journaux.solde_ouverture.
+CREATE TABLE IF NOT EXISTS soldes_ouverture_centre (
+    centre           text NOT NULL REFERENCES centres(code_centre),
+    journal          text NOT NULL REFERENCES journaux(journal),
+    solde_ouverture  numeric(14, 2) NOT NULL DEFAULT 0,
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (centre, journal)
 );
 
 CREATE TABLE IF NOT EXISTS utilisateurs (
@@ -64,7 +100,13 @@ CREATE TABLE IF NOT EXISTS utilisateurs (
     nom                   text NOT NULL,
     role                  text NOT NULL CHECK (role IN ('saisie', 'validation')),
     centre                text NOT NULL REFERENCES centres(code_centre),
+    -- Hache bcrypt (colonne historiquement en clair : les comptes crees
+    -- avant la migration du 05/09/2026 sont mis a niveau automatiquement au
+    -- premier login reussi, voir logic.donnees.verifier_code_acces).
     code_acces            text NOT NULL,
+    -- Anti brute-force : voir logic.donnees.tenter_connexion.
+    tentatives_echouees   integer NOT NULL DEFAULT 0,
+    verrouille_jusqu_a    timestamptz,
     actif                 text NOT NULL DEFAULT 'oui' CHECK (actif IN ('oui', 'non')),
     updated_at            timestamptz NOT NULL DEFAULT now()
 );
@@ -95,13 +137,23 @@ CREATE TABLE IF NOT EXISTS ecritures (
     valide_le             timestamptz,
     exporte_le            timestamptz,
     observation           text NOT NULL DEFAULT '',
-    valeurs_json           jsonb
+    valeurs_json           jsonb,
+    -- Transferts internes entre centres (voir
+    -- sql/migrations/2026-09-12_transferts_internes.sql). Vides sur toute
+    -- ecriture qui n'est pas un transfert. Presents ici pour qu'une base
+    -- creee de zero (verifier.py, nouveau deploiement) soit complete sans
+    -- avoir a rejouer les migrations ; la migration reste necessaire pour
+    -- les bases deja en service.
+    reference_transfert    text NOT NULL DEFAULT '',
+    centre_contrepartie    text NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_ecritures_piece   ON ecritures(id_piece);
 CREATE INDEX IF NOT EXISTS idx_ecritures_lien     ON ecritures(id_lien) WHERE id_lien <> '';
 CREATE INDEX IF NOT EXISTS idx_ecritures_centre   ON ecritures(centre, date_piece);
 CREATE INDEX IF NOT EXISTS idx_ecritures_statut   ON ecritures(statut);
 CREATE INDEX IF NOT EXISTS idx_ecritures_num_def  ON ecritures(journal, num_definitif);
+CREATE INDEX IF NOT EXISTS idx_ecritures_transfert ON ecritures(reference_transfert)
+    WHERE reference_transfert <> '';
 
 -- Compteurs de numerotation. Remplace le verrou de repertoire de la version
 -- Excel : ici, l'atomicite vient d'un UPSERT (INSERT ... ON CONFLICT DO
@@ -109,6 +161,18 @@ CREATE INDEX IF NOT EXISTS idx_ecritures_num_def  ON ecritures(journal, num_defi
 -- forte concurrence, sans qu'aucun verrou applicatif ne soit necessaire.
 --   cle "prov:{centre}:{aaaamm}"  -> dernier numero provisoire du centre/mois
 --   cle "def:{journal}:{aaaamm}"  -> dernier numero definitif du journal/mois
+-- Trace des pieces supprimees (seules les pieces non encore validees
+-- peuvent l'etre, voir supprimer_piece) : contenu integral conserve, avec
+-- qui a supprime et quand - une pièce non validee reste ainsi retracable
+-- meme apres suppression, ce que le DELETE seul ne permettait pas.
+CREATE TABLE IF NOT EXISTS suppressions_ecritures (
+    id             serial PRIMARY KEY,
+    id_piece       text NOT NULL,
+    contenu        jsonb NOT NULL,
+    supprime_par   text NOT NULL,
+    supprime_le    timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS compteurs (
     cle      text PRIMARY KEY,
     valeur   integer NOT NULL DEFAULT 0
@@ -135,7 +199,8 @@ DO $$
 DECLARE
     t text;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['comptes', 'tiers', 'journaux', 'centres', 'utilisateurs', 'ecritures']
+    FOREACH t IN ARRAY ARRAY['comptes', 'tiers', 'journaux', 'centres', 'utilisateurs', 'ecritures',
+                              'soldes_ouverture_centre']
     LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS trg_rev_%1$s ON %1$s;

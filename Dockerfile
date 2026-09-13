@@ -1,4 +1,4 @@
-﻿FROM python:3.14-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
@@ -7,11 +7,15 @@ ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY chat_config.py .
 COPY logic ./logic
 COPY sql ./sql
+COPY mcp_server ./mcp_server
+COPY www ./www
 
 EXPOSE 8000
 

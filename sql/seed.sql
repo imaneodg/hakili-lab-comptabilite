@@ -53,7 +53,7 @@ INSERT INTO comptes (compte, intitule, nature, tiers_obligatoire, nb_2024_2025, 
 ('707810', 'Frais de dossier et de documents', 'produit', 'non', 294, 'non'),
 ('751500', 'Gains sur differences de reglement', 'produit', 'non', 3, 'non'),
 ('422000', 'Personnel - remunerations (collectif)', 'tiers', 'oui', 0, 'non'),
-('521100', 'Banques (BDU-BF)', 'tresorerie', 'non', 0, 'non'),
+('521100', 'Banques (CBI)', 'tresorerie', 'non', 0, 'non'),
 ('631800', 'Autres frais bancaires', 'charge', 'non', 0, 'non'),
 ('447100', 'Etat impots sur le revenu', 'bilan', 'non', 0, 'non'),
 ('447200', 'Etat impots sur salaire', 'bilan', 'non', 0, 'non'),
@@ -69,21 +69,36 @@ INSERT INTO comptes (compte, intitule, nature, tiers_obligatoire, nb_2024_2025, 
 ('471000', 'Compte d''attente / operations a reclasser', 'bilan', 'non', 0, 'non');
 
 -- Journaux
-INSERT INTO journaux (journal, intitule, compte_contrepartie, type, prefixe_piece, solde_ouverture) VALUES
-('CP', 'Caisse principale', '571100', 'tresorerie', 'CP', 0.0),
-('CMD', 'Caisse menues depenses', '571200', 'tresorerie', 'CMD', 0.0),
-('BDU-BF', 'Banque de l''Union', '521100', 'tresorerie', 'BDU', 0.0),
-('VTE', 'Ventes', NULL, 'operations', 'VTE', 0.0),
-('ACH', 'Achats', NULL, 'operations', 'ACH', 0.0);
+-- CP et CMD sont des caisses physiques (caisse_physique = 'oui') : chaque
+-- centre a son propre tiroir-caisse, son propre solde d'ouverture vit donc
+-- dans soldes_ouverture_centre (seede plus bas), jamais dans solde_ouverture
+-- ci-dessous, qui reste a 0 et n'est pas lu pour ces deux journaux.
+-- Le journal "Banque" est un compte unique partage par tous les centres
+-- (caisse_physique = 'non') : son solde d'ouverture est ici, a 0 en attendant
+-- que le comptable le renseigne (montant reel a l'ouverture du compte CBI).
+INSERT INTO journaux (journal, intitule, compte_contrepartie, type, prefixe_piece, solde_ouverture,
+                       caisse_physique, actif) VALUES
+('CP', 'Caisse principale', '571100', 'tresorerie', 'CP', 0.0, 'oui', 'oui'),
+('CMD', 'Caisse menues depenses', '571200', 'tresorerie', 'CMD', 0.0, 'oui', 'oui'),
+('Banque', 'CBI', '521100', 'tresorerie', 'CBI', 0.0, 'non', 'oui'),
+('VTE', 'Ventes', NULL, 'operations', 'VTE', 0.0, 'non', 'oui'),
+('ACH', 'Achats', NULL, 'operations', 'ACH', 0.0, 'non', 'oui');
 
 -- Centres (les 5 antennes + le siege)
-INSERT INTO centres (code_centre, intitule, section_analytique, actif, code_acces) VALUES
-('PIS', 'Pissy', 'PIS', 'oui', '1111'),
-('TAM', 'Tampouy', 'TAM', 'oui', '2222'),
-('SAA', 'Saaba', 'SAA', 'oui', '3333'),
-('SIA', 'SIAO', 'SIA', 'oui', '4444'),
-('NAG', 'Nagrin', 'NAG', 'oui', '5555'),
-('SIE', 'Siege', 'SIE', 'oui', '9999');
+INSERT INTO centres (code_centre, intitule, section_analytique, actif) VALUES
+('PIS', 'Pissy', 'PIS', 'oui'),
+('TAM', 'Tampouy', 'TAM', 'oui'),
+('SAA', 'Saaba', 'SAA', 'oui'),
+('SIA', 'SIAO', 'SIA', 'oui'),
+('NAG', 'Nagrin', 'NAG', 'oui'),
+('SIE', 'Siege', 'SIE', 'oui');
+
+-- Soldes d'ouverture des caisses physiques, par centre : a 0 au demarrage
+-- d'une base neuve, a renseigner ensuite depuis Referentiel avec l'encaisse
+-- reelle de chaque centre (CP et CMD ont chacun leur propre tiroir-caisse).
+INSERT INTO soldes_ouverture_centre (centre, journal, solde_ouverture)
+SELECT code_centre, journal, 0.0
+FROM centres CROSS JOIN (VALUES ('CP'), ('CMD')) AS j(journal);
 
 -- Libelles normalises suggeres a la saisie (generiques, aucune donnee personnelle)
 INSERT INTO libelles_types (compte, libelle, frequence) VALUES

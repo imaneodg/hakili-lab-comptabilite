@@ -636,27 +636,47 @@ Ce dossier est volontairement exclu de Git afin de ne pas envoyer les sauvegarde
 
 
 
-\## Docker
+\## Docker et déploiement en production
 
 
 
-Le projet contient également un fichier :
+Le projet contient :
 
 
 
 ```text
 
-Dockerfile
+Dockerfile          — image de l'application (Shiny + assistant IA)
+
+docker-compose.yml  — orchestration app + reverse proxy TLS
+
+nginx/hakili.conf   — configuration nginx (a adapter : domaine, certificats)
 
 ```
 
 
 
-permettant de préparer la conteneurisation de l'application.
+Le Dockerfile copie désormais bien tout ce dont l'application a besoin pour fonctionner en conteneur, y compris `mcp\_server/` et `chat\_config.py` (l'assistant IA plantait auparavant en conteneur, faute de ces deux éléments — corrigé le 05/09/2026).
 
 
 
-La mise en place de Docker et le déploiement seront réalisés séparément après la validation du fonctionnement du projet en local.
+Pour un premier déploiement réel :
+
+
+
+\1. compléter `.env` à la racine (voir `.env.example`) ;
+
+\2. mettre un certificat TLS réel dans `nginx/certs/` (`fullchain.pem`, `privkey.pem` — un certificat Let's Encrypt via certbot convient) ;
+
+\3. `docker compose up -d --build`.
+
+
+
+PostgreSQL n'est volontairement pas inclus dans `docker-compose.yml` : la base `Hakili\_compta` reste gérée séparément (locale ou serveur dédié), `DATABASE\_URL` dans `.env` pointe simplement vers elle.
+
+
+
+Ne jamais exposer le port 8000 de l'application directement en dehors d'un réseau local de confiance : sans le reverse proxy TLS devant elle, les codes d'accès et toutes les données comptables circuleraient en clair sur le réseau.
 
 
 
@@ -732,23 +752,75 @@ Le projet est actuellement organisé autour de :
 
 
 
-Certaines améliorations pourront être ajoutées progressivement, notamment :
+Corrigé le 05/09/2026 (voir `audit\_architecture\_hakili\_lab.md`) :
 
 
 
-\* amélioration de la gestion et du hachage des mots de passe ;
+\* hachage bcrypt des codes d'accès, avec migration automatique et transparente des comptes existants ;
+
+\* verrouillage temporaire après plusieurs tentatives de connexion incorrectes ;
+
+\* image Docker complète (l'assistant IA ne plantait plus en local mais aurait planté en conteneur) ;
+
+\* dépendances figées à des versions précises, doublons supprimés ;
+
+\* trace d'audit sur la suppression d'une pièce (auteur, horodatage, contenu conservé) ;
+
+\* journalisation des opérations financières et des événements de connexion ;
+
+\* copie hors site optionnelle des sauvegardes (`HAKILI\_BACKUP\_RCLONE\_REMOTE`) ;
+
+\* modèle de déploiement Docker + reverse proxy TLS (`docker-compose.yml`, `nginx/`).
+
+
+
+Corrigé le 10/09/2026 (voir `audit\_complet\_hakili\_lab\_2026-09-10.md`) :
+
+
+
+\* contrôle du rôle comptable refait côté serveur sur les dix actions qui n'en avaient aucun (validation, export Sage, création/désactivation d'utilisateur, plan comptable, plan tiers, soldes d'ouverture, nouvelle année) — auparavant, seul l'affichage du bouton protégeait ces actions ;
+
+\* verrouillage anti brute-force sécurisé contre les tentatives de connexion envoyées en parallèle (`FOR UPDATE` sur la ligne utilisateur pendant la vérification) ;
+
+\* longueur minimale du code d'accès relevée de 4 à 6 caractères pour les comptes créés à partir de maintenant ;
+
+\* colonne `centres.code\_acces` supprimée (jamais lue par le code applicatif, reliquat en clair d'un modèle antérieur — voir `sql/migrations/2026-09-10\_suppression\_code\_acces\_centres.sql` pour une base déjà en service) ;
+
+\* enregistrement des soldes d'ouverture (`\_soldes`) : un échec sur un journal était auparavant avalé silencieusement et le message affiché restait "Soldes d'ouverture enregistrés" comme si tout avait réussi — les échecs sont désormais listés nommément et distingués d'un succès ;
+
+\* quatre indicateurs financiers de l'assistant IA (poste de dépense principal, part des charges fixes, part loyer/eau/électricité, dépenses anormales) sous-estimaient les charges dès qu'un salaire (modèle "rémunération", compte 422000) était versé, ce compte étant de nature `tiers` et non `charge` — corrigé en réutilisant partout le même élargissement déjà appliqué à `part\_masse\_salariale` ;
+
+\* export Sage (`.txt`) en `latin1` : un caractère comme « œ », un guillemet typographique ou un tiret cadratin dans un libellé faisait planter le téléchargement de tout le lot de pièces sélectionné — passage à `cp1252` (plus large) avec un filet de sécurité (`errors="replace"`) qui empêche désormais tout plantage, même pour un caractère encore hors de cette table ;
+
+\* composition du libellé d'une avance de paiement (`PREFIXE NOM/MOIS`) : un nom de tiers un peu long faisait couper silencieusement le `/MOIS` final par la troncature à 60 caractères, cassant sans erreur la suggestion automatique du mois suivant — c'est maintenant le nom qui est raccourci en priorité, jamais le mois ;
+
+\* un modèle de saisie qui lève une exception interne (`construire\_lignes`) était totalement invisible pour l'utilisateur comme pour le développeur — l'incident est désormais journalisé ;
+
+\* écran instable ("écrans roses", onglets qui sautent, formulaire de Saisie impossible à remplir) : `page()` reconstruisait la totalité de l'application (tous les onglets, `m\_modele`, `m\_journal`...) à chaque écriture comptable enregistrée n'importe où sur les 5 centres, via sa dépendance indirecte à `\_disque()` (sondage Postgres toutes les 0,5 s). La structure des onglets est désormais construite une seule fois par connexion (nouvelle sortie `corps()`, lecture du référentiel sous `reactive.isolate()`) ; `m\_champs()` (champs Élève/Compte/Montant du formulaire) isole de la même façon sa lecture du référentiel. Les données affichées (tableaux, soldes...) continuent de se rafraîchir normalement — seule la structure et les champs en cours de remplissage sont désormais protégés ;
+
+\* avertissement "Le modèle « ... » n'existe que sur le journal ..." affiché à tort à chaque connexion sur le modèle par défaut ("Encaissement de frais de scolarité") : le sélecteur de journal caché (`m\_journal`) démarre sans valeur explicite, donc sur le premier journal de la table (`ACH`), qui ne correspond pas au journal imposé par ce modèle (`CP`) ; comme `@reactive.event()` s'exécute par défaut dès la connexion, l'avertissement se déclenchait une fois à chaque session avant toute action de l'utilisateur — corrigé avec `ignore_init=True` sur ce déclencheur, qui ne réagit plus qu'aux changements réels de journal ;
+
+\* panneau "Écriture générée" instable pendant la Saisie, à deux niveaux distincts : (1) `valeurs()`, `operation()`, `m\_apercu()` et `m\_ruban()` lisaient `ref()`/`donnees()` directement, donc tout écriture enregistrée sur n'importe quel des 5 centres reconstruisait ce panneau même sans y toucher — corrigé par le même `reactive.isolate()` que pour `m\_champs()` ; (2) les champs de montant (`ch\_montant`, `m\_rep\_montant\_*`) renvoyaient leur valeur au serveur à chaque frappe, donc chaque chiffre tapé reconstruisait tout le panneau — corrigé avec `update\_on="blur"` (natif à Shiny), qui n'envoie la valeur qu'en quittant le champ, sans rien changer au résultat final. Les deux causes ont été vérifiées séparément par un test Playwright avec `MutationObserver` sur `#m\_apercu`/`#m\_ruban` (0 reconstruction en écriture externe ou en pleine frappe, une seule juste après avoir quitté le champ) ;
+
+\* tableau de répartition mois/nature/montant (modèle "Encaissement") qui se reconstruisait en entier dès qu'une seule ligne changeait, détruisant aussi les champs des autres lignes non touchées (`_ligne\_repartition\_ui()` lisait ses valeurs sans `reactive.isolate()`, alors qu'elle est appelée par `m\_bloc\_repartition()` qui définit ces mêmes champs) — vérifié par un marqueur posé sur une ligne, perdu après modification d'une autre ligne avant correctif, conservé après. Voir `tests/test\_reactivite\_saisie.py` ;
+
+\* flash sombre et brutal au clic sur les boutons "discrets" (`Vider`, `Supprimer`, boutons "+" et boutons-texte du Référentiel) : ces classes maison (`.btn-icone`, `.btn-texte`, `.btn-discret`, `.btn-danger-discret`) ne définissaient pas les variables `--bs-btn-active-*`, donc l'état pressé (`:active`) retombait sur la règle `.btn-outline-default, .btn-default:not(.btn-primary, ...)` de Bootstrap, plus spécifique (à cause du `:not()`) que nos classes seules, qui met le bouton en gris très foncé (`#404040`) le temps du clic — confirmé pixel par pixel (`getComputedStyle` pendant un vrai `mousedown` Playwright) après avoir écarté, sur l'enregistrement vidéo fourni, toute reconstruction intempestive du panneau "Écriture générée" (chaque mise à jour y reste unique et propre). Corrigé en fixant ces trois variables avec `!important` — seul moyen de battre la spécificité de la règle Bootstrap — pour que l'état pressé reste dans les tons discrets de chaque bouton au lieu de virer au noir. Voir `tests/test\_reactivite\_saisie.py`.
+
+
+
+Reste à faire, notamment :
+
+
 
 \* gestion des pièces justificatives numériques ;
 
-\* amélioration des mécanismes de sécurité ;
+\* décision définitive sur l'architecture des 5 centres (bases locales synchronisées ou connexion directe à `Hakili\_compta`) ;
 
-\* déploiement sur un serveur ;
+\* supervision applicative (alertes automatiques en cas d'erreur, au-delà du fichier de log) ;
 
-\* supervision de l'application ;
+\* test de restauration documenté des sauvegardes ;
 
-\* automatisation avancée des sauvegardes ;
-
-\* amélioration des mécanismes d'alerte.
+\* couverture de tests plus large (`tests/` ne couvre pour l'instant que l'authentification et quelques utilitaires purs).
 
 
 

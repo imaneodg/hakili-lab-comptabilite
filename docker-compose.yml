@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Orchestration de production : app Shiny + reverse proxy TLS.
+#
+# Postgres n'est PAS inclus ici : la base Hakili_compta reste geree par le
+# service Postgres deja en place (local ou serveur dedie) - DATABASE_URL
+# dans .env pointe simplement vers elle. Inclure Postgres dans ce compose
+# n'apporterait rien tant que la decision sur l'architecture des 5 centres
+# (bases locales synchronisees ou connexion directe a une base centrale)
+# n'est pas tranchee.
+#
+# Usage :
+#   1. Completer .env (voir .env.example) a la racine du projet.
+#   2. Mettre un vrai certificat dans nginx/certs/ (voir nginx/hakili.conf)
+#      ou passer par un reverse proxy externe deja equipe (Caddy, Traefik,
+#      un load balancer manage...) et sauter le service nginx ci-dessous.
+#   3. docker compose up -d --build
+# ---------------------------------------------------------------------------
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "8000"
+    volumes:
+      - ./backup/sauvegardes:/app/backup/sauvegardes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx/hakili.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro

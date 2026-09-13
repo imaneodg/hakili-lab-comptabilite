@@ -16,6 +16,17 @@
 # comptabilite de cette taille, plus souvent si le volume de saisie
 # l'impose. Le nom du fichier inclut la date et l'heure, deux executions le
 # meme jour ne s'ecrasent donc jamais.
+#
+# Copie hors site (optionnelle mais fortement recommandee) : une sauvegarde
+# qui reste sur le meme disque que la base qu'elle protege ne survit ni a
+# une panne disque, ni a un vol de materiel, ni a un ransomware sur la
+# machine. Si HAKILI_BACKUP_RCLONE_REMOTE est definie (ex.
+# "hakili-backup:hakili-lab/postgres", une destination rclone deja
+# configuree - S3, Backblaze B2, Google Drive... peu importe le backend),
+# chaque sauvegarde reussie y est copiee immediatement apres sa creation. Un
+# echec de cette copie est journalise mais ne fait jamais echouer la
+# sauvegarde locale elle-meme : mieux vaut une sauvegarde locale sans copie
+# distante ce jour-la qu'aucune sauvegarde du tout.
 # ---------------------------------------------------------------------------
 
 import os
@@ -50,6 +61,31 @@ def _args_connexion():
     return [url] if url else []
 
 
+def _copier_hors_site(fichier):
+    """Copie la sauvegarde vers la destination rclone configuree, si elle
+    l'est. N'echoue jamais bruyamment : une copie distante manquee est un
+    probleme a corriger, pas une raison de considerer la sauvegarde du jour
+    comme perdue alors que la copie locale, elle, a reussi."""
+    remote = os.environ.get("HAKILI_BACKUP_RCLONE_REMOTE")
+    if not remote:
+        _log("Copie hors site non configuree (HAKILI_BACKUP_RCLONE_REMOTE absente) "
+             "- cette sauvegarde ne reste que sur ce disque.")
+        return
+    commande = ["rclone", "copy", str(fichier), remote]
+    try:
+        resultat = subprocess.run(commande, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        _log("Copie hors site ECHOUEE : rclone n'est pas installe sur cette machine.")
+        return
+    except subprocess.TimeoutExpired:
+        _log("Copie hors site ECHOUEE : delai depasse (600s).")
+        return
+    if resultat.returncode != 0:
+        _log(f"Copie hors site ECHOUEE : {resultat.stderr.strip() or 'rclone a echoue sans message.'}")
+        return
+    _log(f"Copie hors site reussie vers {remote}.")
+
+
 def sauvegarder():
     DOSSIER_SAUVEGARDES.mkdir(parents=True, exist_ok=True)
     horodatage = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -70,6 +106,7 @@ def sauvegarder():
     fichier_tmp.rename(fichier)
     taille_ko = fichier.stat().st_size // 1024
     _log(f"Sauvegarde reussie : {fichier.name} ({taille_ko} Ko)")
+    _copier_hors_site(fichier)
     return True
 
 

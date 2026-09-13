@@ -1,0 +1,751 @@
+/* Police Inter hebergee localement (fonts/inter/) plutot que via Google Fonts :
+   l'appli tourne sur des postes de caisse qui peuvent perdre l'acces reseau,
+   hors ligne le texte retombait sur les polices systeme par defaut (mineur,
+   mais incoherent avec le reste - cf. bootstrap-icons ci-dessous pour le
+   meme probleme, plus grave, sur les icones). Fichiers variables (axe wght
+   100-900) : une seule regle par sous-ensemble de caracteres suffit pour
+   couvrir les quatre graisses utilisees (400/500/600/700), au lieu des
+   quatre regles par sous-ensemble que sert Google (meme fichier repete). */
+@font-face {
+  font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('fonts/inter/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('fonts/inter/inter-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ---------------------------------------------------------------------
+   Design tokens (refonte visuelle - etape 1, tokens hk-*). Palette et
+   echelles fournies par le prompt de refonte ; rien n'est defini "en
+   dur" ailleurs que dans ce bloc, pour que ce fichier reste le seul
+   endroit a changer.
+   ------------------------------------------------------------------ */
+:root {
+  /* Couleurs */
+  --hk-primaire:        #1A5FD0;
+  --hk-primaire-fonce:  #1548A6;
+  --hk-primaire-clair:  #EAF2FD;
+  --hk-sidebar:         #0F2D5C;
+  --hk-sidebar-actif:   #1D63D8;
+  --hk-sidebar-texte:   #C7D6EC;
+  --hk-fond:            #F4F7FC;
+  --hk-carte:           #FFFFFF;
+  --hk-blanc:           #FFFFFF;
+  --hk-bordure:         #E3E9F2;
+  --hk-bordure-forte:   #C7CFDA;
+  --hk-bordure-douce:   #EEF1F5;
+  --hk-filtres:         #F2F6FB;
+  --hk-tableau-entete:  #EDF2F9;
+  /* Distincte de --hk-tableau-entete (etape 3 : couleur d'en-tete de
+     tableau, plus saturee) - reservee a la ligne "tresorerie" de
+     l'ecriture generee (#m_apercu), un simple accent tres discret. */
+  --hk-ligne-accent:    #FAFBFD;
+  --hk-texte:           #0F2344;
+  --hk-texte-doux:      #5B6B82;
+  --hk-succes:          #2E9E5B;
+  --hk-succes-clair:    #E7F6ED;
+  --hk-erreur:          #E03131;
+  --hk-erreur-clair:    #FDECEC;
+  --hk-neutre:          #6B7A90;
+  --hk-neutre-clair:    #EEF1F6;
+  /* Alerte (ruban "en cours" de Controles) : absente de la palette cible
+     fournie (qui ne definit que succes/erreur/neutre), conservee sous ce
+     nom pour ne perdre aucune teinte deja utilisee dans l'appli. */
+  --hk-alerte:          #9A6B12;
+  --hk-alerte-clair:    #FBF1DD;
+
+  /* Typographie */
+  --hk-police: 'Inter', -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --hk-titre:      26px;
+  --hk-sous-titre: 15px;
+  --hk-courant:    14.5px;
+  --hk-petit:      13px;
+  --hk-etiquette:  12px;
+
+  /* Rayons */
+  --hk-rayon-carte:  14px;
+  --hk-rayon-champ:  8px;
+  --hk-rayon-pilule: 999px;
+
+  /* Espacements */
+  --hk-espace-1: 8px;
+  --hk-espace-2: 12px;
+  --hk-espace-3: 16px;
+  --hk-espace-4: 24px;
+  --hk-espace-5: 32px;
+
+  /* Dimensions cibles - pas encore appliquees a la coquille (etape
+     suivante de la refonte) : --barre-larg/--barre-tete/--barre-pied
+     ci-dessous restent la source de verite tant que la sidebar/l'entete
+     n'ont pas ete restructurees. */
+  --hk-sidebar-largeur: 280px;
+  --hk-entete-hauteur:  64px;
+  --hk-champ-hauteur:   46px;
+  --hk-bouton-hauteur:  48px;
+
+  /* Ombres - la cible ne donne qu'un seul niveau (--hk-ombre, tres
+     legere) ; les deux niveaux additionnels reprennent sa formule
+     (teinte encre, opacite croissante) pour ne rien aplatir par rapport
+     aux trois niveaux deja utilises par l'appli. */
+  --hk-ombre:          0 1px 2px rgba(15, 35, 68, .06), 0 1px 3px rgba(15, 35, 68, .04);
+  --hk-ombre-moyenne:  0 2px 10px rgba(15, 35, 68, .07), 0 1px 2px rgba(15, 35, 68, .05);
+  --hk-ombre-large:    0 16px 40px rgba(15, 35, 68, .14);
+
+  /* Sidebar de navigation - largeur et hauteur d'entete desormais
+     sourcees depuis les tokens --hk-* ci-dessus (etape 2 de la refonte :
+     coquille). --barre-pied reste une valeur propre : c'est la hauteur
+     reservee en bas de la colonne de navigation pour le pied utilisateur
+     (nom, centre, deconnexion) + la nouvelle carte "Centre" - aucun
+     token --hk-* ne la couvre. */
+  --barre-larg: var(--hk-sidebar-largeur); --barre-tete: var(--hk-entete-hauteur); --barre-pied: 148px;
+}
+
+* { box-sizing:border-box; }
+body { background:var(--hk-fond); color:var(--hk-texte);
+  font-family:var(--hk-police);
+  font-size:var(--hk-courant); line-height:1.5; -webkit-font-smoothing:antialiased; }
+h1, h2, h3, h4, h5 { font-family:inherit; color:var(--hk-texte); }
+::selection { background:var(--hk-primaire-clair); color:var(--hk-texte); }
+
+/* Ascenseur discret, coherent sur les grilles et le corps de page - une
+   appli professionnelle ne laisse jamais l'ascenseur natif du systeme
+   dominer une interface par ailleurs entierement dessinee. */
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--hk-bordure-forte); border-radius:99px; border:2px solid var(--hk-fond); }
+::-webkit-scrollbar-thumb:hover { background:var(--hk-neutre); }
+
+/* ---------------------------------------------------------------------
+   Sidebar de navigation (refonte visuelle 11/09/2026, remplace l'ancien
+   bandeau horizontal + la barre d'onglets du haut - une seule navigation,
+   verticale, jamais les deux a la fois).
+
+   Structure : trois blocs empiles en position fixe sur la meme colonne
+   (.barre-logo en tete, la colonne de navigation generee par
+   ui.navset_pill_list au milieu, .barre-utilisateur en pied) - jamais un
+   seul gros bloc, pour que la liste des onglets defile seule si elle
+   s'allonge un jour, sans jamais pousser le logo ou l'utilisateur hors
+   ecran. Le contenu (colonne de droite de navset_pill_list) recoit la
+   marge equivalente : voir plus bas "#corps > .row" - le selecteur cible
+   #corps (l'id du <div> que ui.output_ui("corps") insere lui-meme, entre
+   .corps-page et la grille Bootstrap de navset_pill_list), pas
+   ".corps-page > .row" qui ne matche jamais (cet id intermediaire est
+   toujours present, meme s'il n'apparait nulle part dans ce fichier).
+   ------------------------------------------------------------------ */
+.logo-bandeau { height:30px; width:auto; display:block; }
+.logo-connexion { height:118px; width:auto; display:block; margin:0 auto 14px; }
+
+.barre-logo { position:fixed; top:0; left:0; z-index:30; width:var(--barre-larg);
+  height:var(--barre-tete); background:var(--hk-sidebar); display:flex; align-items:center;
+  gap:10px; padding:0 20px; border-bottom:1px solid rgba(255,255,255,.1); }
+.barre-logo .texte { color:var(--hk-blanc); line-height:1.25; }
+.barre-logo .texte b { display:block; font-size:13.5px; font-weight:700; letter-spacing:.02em; }
+.barre-logo .texte span { font-size:10.5px; color:var(--hk-sidebar-texte); }
+
+.barre-utilisateur { position:fixed; bottom:0; left:0; z-index:30; width:var(--barre-larg);
+  min-height:var(--barre-pied); background:var(--hk-sidebar); color:var(--hk-sidebar-texte);
+  font-size:12px; line-height:1.45; padding:14px 20px; border-top:1px solid rgba(255,255,255,.1); }
+.barre-utilisateur b { color:var(--hk-blanc); display:block; font-size:13.5px; font-weight:600; }
+.barre-utilisateur a { color:var(--hk-sidebar-texte) !important; }
+.barre-utilisateur a:hover { color:var(--hk-blanc) !important; }
+
+/* La colonne de navigation (premiere colonne generee par
+   ui.navset_pill_list) devient la sidebar elle-meme : positionnee sous le
+   logo et au-dessus du pied utilisateur, meme largeur, meme fond sombre.
+   Cible par position (:first-child) plutot que par une classe Bootstrap
+   (.col-sm-N) qui depend du parametre "widths" et qui sert par ailleurs
+   ailleurs dans l'appli (grilles internes des onglets) - jamais de regle
+   globale sur .col-sm-* pour ne rien y faire fuiter. */
+#corps > .row > div:first-child { position:fixed; top:var(--barre-tete);
+  bottom:var(--barre-pied); left:0; width:var(--barre-larg); background:var(--hk-sidebar);
+  overflow-y:auto; padding:14px 12px; }
+#corps > .row > div:first-child .nav-pills { flex-direction:column; gap:2px; }
+#corps > .row > div:first-child .nav-link { color:var(--hk-sidebar-texte); font-size:13.5px;
+  font-weight:600; border-radius:var(--hk-rayon-champ); padding:10px 14px; display:flex;
+  align-items:center; gap:10px; }
+#corps > .row > div:first-child .nav-link i { font-size:15px; width:18px; text-align:center; }
+#corps > .row > div:first-child .nav-link:hover { background:rgba(255,255,255,.06); color:var(--hk-blanc); }
+#corps > .row > div:first-child .nav-link.active { background:var(--hk-sidebar-actif); color:var(--hk-blanc); }
+
+/* Corps de page : la sidebar occupe la colonne de gauche en position
+   fixe (ci-dessus), le contenu (deuxieme colonne de navset_pill_list)
+   recoit la marge equivalente et remplit tout le reste de la largeur -
+   aucune des deux ne depend plus des pourcentages Bootstrap (col-sm-N). */
+.corps-page { padding:0; }
+#corps > .row { margin-left:0; margin-right:0; }
+/* margin-top reserve desormais la hauteur du nouvel entete blanc
+   (.hk-entete ci-dessous, ajoute etape 2) en plus de la largeur de la
+   sidebar : avant son ajout, rien n'occupait la bande du haut a droite
+   de la sidebar, donc ce n'etait pas necessaire. */
+#corps > .row > div:last-child { flex:1 1 auto; width:auto;
+  /* min-width:0 leve la limite min-content du flex : sans elle, un DataGrid large
+     (Referentiel) repousse la colonne hors de l'ecran au lieu de defiler a l'interieur. */
+  min-width:0;
+  /* 100% se calcule sur la .row entiere et ignore la marge gauche de la sidebar :
+     il faut la retrancher explicitement, sinon la colonne deborde de --barre-larg. */
+  max-width:calc(100% - var(--barre-larg));
+  margin-left:var(--barre-larg); margin-top:var(--barre-tete); padding:28px 32px 40px; }
+@media (max-width: 900px) {
+  /* Aucun ecran de ce type n'est visé par la refonte (usage poste fixe en
+     centre), mais on evite qu'un chargement sur mobile/tablette casse
+     completement la mise en page plutot que de ne rien prevoir. */
+  #corps > .row > div:first-child { position:static; width:auto; height:auto; }
+  /* max-width:100% obligatoire ici : la sidebar n'est plus decalee sur cet
+     ecran, le calc() ci-dessus amputerait la colonne de 280px pour rien. */
+  #corps > .row > div:last-child { margin-left:0; margin-top:0; max-width:100%; }
+  .barre-logo, .barre-utilisateur, .hk-entete, .hk-vague { position:static; width:auto; }
+}
+
+/* ---------------------------------------------------------------------
+   En-tete blanc (refonte visuelle - etape 2, coquille). N'existait pas
+   avant : fixe en haut, a droite de la sidebar, sur toute la largeur
+   restante. Le centre de cet entete reste volontairement vide - une
+   deuxieme navigation en pilules y ferait doublon avec la sidebar, cf.
+   le prompt de refonte (question ouverte non tranchee : navigation en
+   double). Chevron et icone engrenage sont decoratifs pour l'instant :
+   aucun menu profil ni page de parametres n'existe cote serveur.
+   ------------------------------------------------------------------ */
+.hk-entete { position:fixed; top:0; left:var(--barre-larg); right:0; height:var(--barre-tete);
+  background:var(--hk-carte); border-bottom:1px solid var(--hk-bordure); z-index:20;
+  display:flex; align-items:center; justify-content:flex-end; padding:0 var(--hk-espace-5); }
+.hk-entete-compte { display:flex; align-items:center; gap:10px; font-size:13.5px;
+  font-weight:600; color:var(--hk-texte); }
+.hk-entete-avatar { width:32px; height:32px; border-radius:50%; background:var(--hk-primaire-clair);
+  color:var(--hk-primaire); display:flex; align-items:center; justify-content:center;
+  font-size:13px; font-weight:700; flex:none; }
+
+/* ---------------------------------------------------------------------
+   Carte "Centre" de la sidebar (refonte visuelle - etape 2), nichee dans
+   .barre-utilisateur (deja positionnee en fixe en bas de sidebar) plutot
+   qu'en bloc fixe independant : meme resultat visuel (juste au-dessus du
+   pied utilisateur), sans dupliquer un calcul de position. Rappel visuel
+   uniquement : aucune entree "centre" n'existe cote serveur (le centre
+   est fixe a la connexion, cf. l_centre sur l'ecran de connexion), donc
+   pas de survol/clic actif ici.
+   ------------------------------------------------------------------ */
+.hk-centre-carte { display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.12); border-radius:var(--hk-rayon-champ);
+  padding:9px 12px; margin-bottom:12px; }
+.hk-centre-carte > i.bi-building { font-size:16px; color:var(--hk-sidebar-texte); flex:none; }
+.hk-centre-carte-texte { flex:1 1 auto; min-width:0; line-height:1.3; }
+.hk-centre-carte-label { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--hk-sidebar-texte); }
+.hk-centre-carte-valeur { display:block; font-size:13px; font-weight:600; color:var(--hk-blanc);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hk-centre-carte > i.bi-chevron-right { font-size:12px; color:var(--hk-sidebar-texte); flex:none; }
+
+/* Forme decorative en fond de sidebar (refonte visuelle - etape 2) :
+   purement visuelle, jamais interactive (pointer-events:none), toujours
+   derriere le contenu de la sidebar (z-index inferieur aux blocs fixes
+   ci-dessus, tous a 30). */
+.hk-vague { position:fixed; left:0; bottom:0; width:var(--barre-larg); height:220px;
+  z-index:10; pointer-events:none; overflow:hidden; }
+.hk-vague svg { display:block; width:100%; height:100%; }
+
+/* ---------------------------------------------------------------------
+   Titre de page (refonte visuelle - etape 2) : pastille ronde + titre +
+   sous-titre, genere par titre_page() dans composants.py. Pas encore
+   utilise dans aucune page a cette etape - l'insertion page par page se
+   fait aux etapes suivantes de la refonte (Saisie, Brouillard...).
+   ------------------------------------------------------------------ */
+.hk-page-titre { display:flex; align-items:center; gap:var(--hk-espace-3); margin-bottom:var(--hk-espace-4); }
+.hk-page-pastille { width:64px; height:64px; border-radius:50%; background:var(--hk-primaire);
+  color:var(--hk-blanc); display:flex; align-items:center; justify-content:center;
+  font-size:26px; flex:none; }
+.hk-page-textes { min-width:0; }
+.hk-page-h1 { font-size:var(--hk-titre); font-weight:700; margin:0; color:var(--hk-texte); line-height:1.25; }
+.hk-page-sous { font-size:var(--hk-sous-titre); color:var(--hk-texte-doux); margin:2px 0 0 0;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hk-page-extra { margin-left:auto; flex:none; }
+
+/* ---------------------------------------------------------------------
+   Cartes : unite visuelle de base de toute l'appli
+   ------------------------------------------------------------------ */
+.carte { background:var(--hk-carte); border:1px solid var(--hk-bordure); border-radius:var(--hk-rayon-carte);
+  padding:var(--hk-espace-4); margin-bottom:20px; box-shadow:var(--hk-ombre); }
+.carte-entete { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+.carte-entete h4 { margin:0; }
+.carte h4 { margin:0 0 16px 0; font-size:11px; text-transform:uppercase;
+  letter-spacing:.08em; color:var(--hk-texte-doux); font-weight:700; }
+
+/* Variante compacte : formulaire de saisie, ou l'essentiel doit tenir sans
+   defiler - memes codes visuels, juste moins d'air entre les champs. Ne
+   change rien ailleurs dans l'appli (classe ajoutee, .carte inchangee). */
+.carte-compacte { padding:16px 20px; }
+.carte-compacte h4 { margin-bottom:12px; }
+.carte-compacte .form-group { margin-bottom:10px; }
+.carte-compacte > .row { margin-bottom:0; }
+
+/* ---------------------------------------------------------------------
+   Bandeau de section en tete de carte (refonte visuelle - etape 3,
+   composants.py::carte_bandeau()). Variante pleine largeur et teintee,
+   distincte de ".carte-entete-icone" ci-dessous (petite pastille icone) :
+   les deux coexistent, chaque page choisit la sienne a sa propre etape.
+   Pas encore utilisee a cette etape.
+   ------------------------------------------------------------------ */
+.carte-bandeau { display:flex; align-items:center; gap:10px; background:var(--hk-primaire-clair);
+  margin:calc(var(--hk-espace-4) * -1) calc(var(--hk-espace-4) * -1) var(--hk-espace-4);
+  padding:14px var(--hk-espace-4); border-radius:var(--hk-rayon-carte) var(--hk-rayon-carte) 0 0; }
+.carte-bandeau i { font-size:20px; color:var(--hk-primaire); flex:none; }
+.carte-bandeau span { font-size:15px; font-weight:700; color:var(--hk-texte); }
+/* Dans une carte compacte, le rembourrage negatif doit correspondre a son
+   propre padding (16px/20px), pas a celui de .carte (24px) - sinon le
+   bandeau deborde ou laisse un liseret blanc sur les cotes. */
+.carte-compacte > .carte-bandeau { margin:-16px -20px var(--hk-espace-3); padding:12px 20px; }
+.carte-bandeau-extra { margin-left:auto; }
+
+/* Bouton rond "+" du Referentiel (refonte visuelle - etape 8) : 36px,
+   variante de .btn-icone (27px, inchange ailleurs - ex. Saisie) pour le
+   bouton d'ajout a droite d'un carte_bandeau(). Sur fond teinte
+   (carte-bandeau), pas de fond blanc propre comme .btn-icone. */
+.btn-icone-grand { width:36px; height:36px; border-radius:50%; border:1px solid var(--hk-bordure-forte);
+  background:transparent; color:var(--hk-primaire); font-size:17px; line-height:1; cursor:pointer;
+  display:flex; align-items:center; justify-content:center; padding:0;
+  --bs-btn-active-bg:var(--hk-primaire) !important; --bs-btn-active-color:var(--hk-blanc) !important;
+  --bs-btn-active-border-color:var(--hk-primaire) !important; }
+.btn-icone-grand:hover { background:var(--hk-primaire); color:var(--hk-blanc); border-color:var(--hk-primaire); }
+
+/* ---------------------------------------------------------------------
+   Refonte visuelle - onglet Saisie uniquement (11/09/2026). Classe
+   distincte de ".carte h4" (ci-dessus) plutot qu'une modification de
+   cette regle partagee : les autres onglets (Brouillard, Validation...)
+   gardent pour l'instant leur petit intitule gris majuscule inchange,
+   seule Saisie recoit ce nouvel en-tete a icone.
+   ------------------------------------------------------------------ */
+.carte-entete-icone { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+.carte-entete-icone .icone-carte { width:32px; height:32px; border-radius:8px;
+  background:var(--hk-primaire-clair); color:var(--hk-primaire); display:flex; align-items:center;
+  justify-content:center; font-size:15px; flex:none; }
+.carte-entete-icone h4 { margin:0; font-size:15px; text-transform:none;
+  letter-spacing:normal; color:var(--hk-texte); font-weight:700; }
+
+/* Champs obligatoires (Saisie uniquement) : astérisque ajoutee visuellement
+   sur le libelle, sans toucher au texte lui-meme (venant pour la plupart de
+   la config des modeles dans logic/modeles.py, jamais modifiee ici) ni a la
+   validation. "Note pour le comptable" est explicitement facultative (son
+   propre texte le dit) et en est donc exclue via son id stable. */
+.grille-saisie label:not([for="m_note"])::after { content:" *"; color:var(--hk-erreur); }
+
+/* Suffixe "F CFA" sur les champs numeriques de montant (Saisie uniquement) -
+   purement visuel : aucun id, aucune valeur, aucun calcul ne change. Cible
+   le conteneur genere par ui.input_numeric() (une <div> qui contient l'
+   <input type="number"> en enfant direct, cf. le code source installe de
+   Shiny), jamais l'input lui-meme, pour ne pas gener la saisie au clavier. */
+.grille-saisie .shiny-input-container:has(> input[type="number"]) { position:relative; }
+.grille-saisie .shiny-input-container:has(> input[type="number"])::after {
+  content:"F CFA"; position:absolute; right:6px;
+  /* Ancrage sur le bas du conteneur, pas sur son milieu : le conteneur inclut
+     le <label>, donc top:50% tombait au-dessus du champ des qu'un label existait. */
+  top:auto; bottom:0; height:var(--hk-champ-hauteur); transform:none;
+  display:flex; align-items:center;
+  font-size:11.5px; font-weight:600; color:var(--hk-texte-doux); background:var(--hk-neutre-clair);
+  border-radius:var(--hk-rayon-champ); padding:0 10px; pointer-events:none; }
+.grille-saisie input[type="number"] { padding-right:70px; text-align:right; }
+
+/* Corrige le 10/09/2026 (quater) : les deux cartes de l'onglet Saisie
+   ("Operation" et "Ecriture generee") etaient placees dans un
+   ui.row()/ui.column(6) - la grille Bootstrap, un conteneur
+   display:flex sans align-items impose. Sans cette propriete, la valeur
+   par defaut ("normal") se comporte comme "stretch" : les deux colonnes
+   sont mises en commun pour le calcul de hauteur du .row a chaque
+   reflow, et output_ui() remplace entierement son contenu (jamais un
+   patch partiel) a chaque changement de modele (m_champs a gauche, puis
+   valeurs()/operation() qui se recalculent une seconde fois des que
+   m_journal se resynchronise, cf. corrections precedentes) - deux
+   reflous rapproches du conteneur partage, percus comme un tremblement
+   de la carte de droite alors que ce n'est pas elle qui a change de
+   taille. Une grille CSS explicite avec align-items:start rend les deux
+   colonnes reellement independantes : chaque carte est ancree en haut
+   de sa colonne et sa hauteur ne depend plus jamais de l'autre, quel
+   que soit le nombre de re-rendus intermediaires cote serveur. Repli sur
+   une seule colonne sous 576px, comme le faisait col-sm-6. */
+.grille-saisie { display:grid; grid-template-columns:2fr 1fr; align-items:start; gap:0 24px; }
+.grille-saisie > .carte { margin-bottom:20px; }
+@media (max-width: 576px) { .grille-saisie { grid-template-columns:1fr; } }
+
+/* Bouton discret "+" qui ouvre un mini-formulaire : jamais un gros bloc
+   affiche par defaut, un geste de plus pour agir. */
+.btn-icone { width:27px; height:27px; border-radius:50%; border:1px solid var(--hk-bordure);
+  background:var(--hk-carte); color:var(--hk-texte-doux); font-size:16px; line-height:1; cursor:pointer;
+  display:flex; align-items:center; justify-content:center; padding:0; transition:.12s;
+  /* Ce bouton n'est pas une variante Bootstrap (btn-primary, btn-secondary...) :
+     sans ces variables, l'etat "presse" retombe sur la regle
+     ".btn-outline-default, .btn-default:not(.btn-primary, ...)" (bootstrap.min.css)
+     qui met --bs-btn-active-bg sur un gris tres fonce (valeur par defaut de
+     Bootstrap). Cette regle a une specificite plus elevee (0,2,0, a cause
+     du :not()) que ".btn-icone" seul (0,1,0) : sans !important elle gagne
+     quand meme et le bouton flashe en sombre a chaque clic au lieu de
+     rester dans ses propres tons discrets. */
+  --bs-btn-active-bg:var(--hk-primaire-clair) !important; --bs-btn-active-color:var(--hk-primaire) !important;
+  --bs-btn-active-border-color:var(--hk-primaire) !important; }
+.btn-icone:hover { background:var(--hk-primaire-clair); border-color:var(--hk-primaire); color:var(--hk-primaire); }
+.btn-texte { border:none; background:none; color:var(--hk-primaire); font-size:12.5px;
+  font-weight:600; padding:0; cursor:pointer;
+  --bs-btn-active-bg:transparent !important; --bs-btn-active-color:var(--hk-primaire) !important;
+  --bs-btn-active-border-color:transparent !important; }
+.btn-texte:hover { text-decoration:underline; }
+.popover-form { min-width:230px; }
+.popover-form .form-group:last-child { margin-bottom:0; }
+.param-item { padding:4px 0; }
+
+/* Panneau flottant : positionne au-dessus du contenu, ne pousse jamais le
+   tableau vers le bas. Rendu par le serveur (jamais duplique), seul son
+   positionnement vient du CSS. */
+.flottant-conteneur { position:relative; display:inline-block; }
+.panneau-flottant { position:absolute; top:100%; z-index:40; margin-top:8px;
+  background:var(--hk-carte); border:1px solid var(--hk-bordure); border-radius:var(--hk-rayon-carte);
+  box-shadow:var(--hk-ombre-large); padding:16px 18px; }
+.flottant-conteneur.a-droite .panneau-flottant { right:0; }
+.flottant-conteneur.a-gauche .panneau-flottant { left:0; }
+.param-aide { font-size:11.5px; color:var(--hk-texte-doux); margin:6px 0 0 0; }
+
+/* ---------------------------------------------------------------------
+   Champs de formulaire : coherents partout, jamais l'apparence par
+   defaut du navigateur. Aucun texte d'exemple dans les champs vides -
+   un libelle clair au-dessus suffit, le champ reste vide tant que
+   personne n'a rien saisi.
+   ------------------------------------------------------------------ */
+.form-group label, label.control-label { font-size:13px; font-weight:700;
+  color:var(--hk-texte); margin-bottom:6px; text-transform:uppercase; letter-spacing:.03em; }
+/* Un libelle de case a cocher est une phrase, pas un intitule de champ. */
+.shiny-input-container .checkbox label,
+.shiny-input-container .form-check label,
+.form-check label {
+  text-transform:none;
+  font-weight:400;
+  letter-spacing:normal;
+  font-size:13.5px;
+  color:var(--hk-texte);
+}
+.form-control, .selectize-input, select.form-select { border-radius:var(--hk-rayon-champ);
+  border-color:var(--hk-bordure); font-size:14px; color:var(--hk-texte); }
+/* Hauteur uniforme des champs (refonte visuelle - etape 3), sauf le champ
+   note (textarea) qui doit rester multi-lignes. */
+.form-control:not(textarea), .selectize-input, select.form-select { height:var(--hk-champ-hauteur); }
+.form-control::placeholder { color:transparent; }
+.form-control:focus, .selectize-input.focus, .selectize-control.focus > .selectize-input {
+  border-color:var(--hk-primaire) !important; box-shadow:0 0 0 3px var(--hk-primaire-clair) !important; }
+.selectize-dropdown { border-color:var(--hk-bordure); box-shadow:var(--hk-ombre-moyenne); border-radius:var(--hk-rayon-champ); }
+.selectize-dropdown .active { background:var(--hk-primaire-clair); color:var(--hk-texte); }
+/* Chevron a droite (refonte visuelle - etape 3) : les <select> natifs
+   (.form-select) en ont deja un via Bootstrap, seul le champ selectize
+   (ch_tiers) n'en a pas nativement. */
+.selectize-control { position:relative; }
+.selectize-control::after { content:"\f282"; font-family:"bootstrap-icons" !important;
+  position:absolute; right:14px; top:50%; transform:translateY(-50%); font-size:11px;
+  color:var(--hk-texte-doux); pointer-events:none; }
+.selectize-control.multi::after { display:none; }
+
+/* Texte d'aide sous un champ (refonte visuelle - etape 3), ex.
+   #m_journal_texte : distincte de ".barre-actions .aide" ci-dessous
+   (aide alignee a droite d'une barre d'actions), meme apparence de base. */
+.aide { font-size:12.5px; color:var(--hk-texte-doux); margin-top:6px; display:block; }
+
+/* Case a cocher (refonte visuelle - etape 3). */
+.form-check-input { width:18px; height:18px; border-radius:4px; border-color:var(--hk-bordure-forte); }
+.form-check-input:checked { background-color:var(--hk-primaire); border-color:var(--hk-primaire); }
+.form-check-input:focus { border-color:var(--hk-primaire); box-shadow:0 0 0 3px var(--hk-primaire-clair); }
+.form-check-label { font-size:14px; color:var(--hk-texte); }
+
+/* Plage de dates (refonte visuelle - etape 3) : ui.input_date_range()
+   genere deja ".input-daterange" avec un separateur dans un
+   ".input-group-text" (voir le HTML rendu par Shiny) - on fusionne les
+   bordures des deux champs en une seule sur ce conteneur et on stylise le
+   separateur en pilule, sans toucher au widget (memes ids, meme
+   comportement JS du datepicker). */
+.input-daterange { border:1px solid var(--hk-bordure); border-radius:var(--hk-rayon-champ);
+  overflow:hidden; background:var(--hk-carte); display:flex; align-items:center; }
+.input-daterange input.form-control { border:none; box-shadow:none; background:transparent;
+  height:calc(var(--hk-champ-hauteur) - 2px); }
+.input-daterange .input-group-addon, .input-daterange .input-group-text { border:none;
+  background:transparent; padding:0; }
+.input-daterange .input-group-text { background:var(--hk-neutre-clair); border-radius:var(--hk-rayon-pilule);
+  padding:3px 12px; margin:0 6px; font-size:12px; color:var(--hk-texte-doux); }
+.input-daterange::before, .input-daterange::after { font-family:"bootstrap-icons" !important;
+  content:"\f214"; font-size:14px; color:var(--hk-texte-doux); display:flex; align-items:center;
+  padding:0 10px; flex:none; }
+
+.num { font-family:ui-monospace,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
+
+/* Montants (refonte visuelle - etape 3, composants.py::format_montant()). */
+.hk-montant { text-align:right; font-variant-numeric:tabular-nums; }
+
+/* ---------------------------------------------------------------------
+   Badges de statut : pastilles pleines, memes teintes que les rubans,
+   pour une lecture immediate du circuit de validation.
+   ------------------------------------------------------------------ */
+/* Refonte visuelle - etape 5 (Brouillard) : render.DataGrid (styles=) ne
+   colore que la cellule elle-meme (styles_statut() dans app.py assigne
+   une classe a la cellule <td>, jamais de HTML/span a l'interieur) - la
+   fonction badge_statut() de composants.py (un <span> pilule) ne peut
+   donc pas etre injectee ici. On rapproche ces cellules d'un badge en
+   les arrondissant/centrant, meme si elles restent larges comme leur
+   colonne plutot que d'epouser le texte (limite du mecanisme styles=,
+   pas contournable en CSS seul). Memes teintes que .hk-badge (step 3). */
+.cell-statut-saisie, .cell-statut-validee, .cell-statut-a_corriger, .cell-statut-exportee {
+  font-weight:600; font-size:12px; text-align:center; border-radius:var(--hk-rayon-pilule); }
+.cell-statut-saisie { background:var(--hk-primaire-clair); color:var(--hk-primaire); }
+.cell-statut-validee { background:var(--hk-succes-clair); color:var(--hk-succes); }
+.cell-statut-a_corriger { background:var(--hk-erreur-clair); color:var(--hk-erreur); }
+.cell-statut-exportee { background:var(--hk-neutre-clair); color:var(--hk-neutre); }
+
+/* Rubans de message : bordure gauche coloree plutot qu'un simple fond
+   teinte, registre "notification" d'une appli metier plutot qu'une
+   bulle de chat. */
+.ruban { padding:11px 16px; border-radius:var(--hk-rayon-champ); margin:14px 0; font-size:13px;
+  border-left:3px solid transparent; }
+.ruban.ok { background:var(--hk-succes-clair); color:var(--hk-succes); border-left-color:var(--hk-succes); }
+.ruban.ko { background:var(--hk-erreur-clair); color:var(--hk-erreur); border-left-color:var(--hk-erreur); }
+.ruban.att { background:var(--hk-fond); color:var(--hk-texte-doux); border-left-color:var(--hk-bordure-forte); }
+/* Variante "information" (refonte visuelle - etape 4, Saisie) : distincte
+   de .ruban.att (neutre/limite atteinte, ex. "six mois par piece au
+   maximum") - reservee aux bandeaux purement informatifs comme la
+   correction en cours (#m_correction_bandeau). */
+.ruban.info { background:var(--hk-primaire-clair); color:var(--hk-primaire-fonce);
+  border-left-color:var(--hk-primaire); }
+.ruban.info a { color:var(--hk-primaire-fonce); font-weight:600; }
+
+/* Lien "+ Ajouter un mois" (refonte visuelle - etape 4, Saisie) :
+   variante de .lien-etendre reservee a m_rep_ajouter (garde son
+   comportement de base : display:block, margin-top, font-size). Les
+   autres usages de .lien-etendre (ex. "Afficher tout" du Referentiel)
+   restent inchanges. */
+.lien-ajouter { color:var(--hk-primaire); text-decoration:underline; font-weight:600; }
+.lien-ajouter i { margin-right:4px; }
+
+table.apercu { width:100%; border-collapse:collapse; }
+table.apercu th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--hk-texte-doux); border-bottom:1px solid var(--hk-bordure); padding:9px 8px; font-weight:700; }
+table.apercu td { padding:9px 8px; border-bottom:1px solid var(--hk-bordure-douce); font-size:13.5px; }
+table.apercu td.m { text-align:right; font-family:ui-monospace,Menlo,Consolas,monospace; }
+table.apercu tr.tresorerie td { background:var(--hk-ligne-accent); font-style:italic; color:var(--hk-texte-doux); }
+table.apercu tfoot td { font-weight:700; border-top:2px solid var(--hk-texte); }
+
+/* Grilles natives Shiny (Brouillard, Validation, Referentiel, Controles) :
+   memes codes visuels que le reste de l'appli - bordure, radius, entetes
+   discrets, ligne survolee/selectionnee marquee en bleu de marque. */
+/* Pas d'"overflow:hidden" ici pour rogner les coins du tableau sur le
+   border-radius : le composant pose "overflow:auto" en style INLINE sur ce
+   meme element, donc la declaration serait morte - et surtout, la rendre
+   gagnante avec !important supprimerait le defilement interne de toutes les
+   grilles (une liste repliee du Referentiel, une grille a hauteur limitee,
+   deviendraient intronquables). Les coins restent donc carres : c'est le
+   prix a payer, et il est bien moins cher qu'un tableau qu'on ne peut plus
+   faire defiler. */
+.shiny-data-grid { border:1px solid var(--hk-bordure) !important; border-radius:var(--hk-rayon-carte) !important;
+  font-size:13.5px; }
+.shiny-data-grid table { width:100%; }
+.shiny-data-grid thead th { background:var(--hk-tableau-entete) !important; color:var(--hk-texte-doux) !important;
+  font-size:11px !important; text-transform:uppercase; letter-spacing:.05em; font-weight:700 !important;
+  border-bottom:1px solid var(--hk-bordure) !important; padding:14px 16px !important; }
+.shiny-data-grid tbody td { border-bottom:1px solid var(--hk-bordure-douce) !important;
+  padding:14px 16px !important; }
+.shiny-data-grid tbody tr:hover td { background:var(--hk-filtres) !important; }
+.shiny-data-grid tbody tr[aria-selected="true"] td { background:var(--hk-primaire-clair) !important; }
+.shiny-data-grid input { border-radius:var(--hk-rayon-champ) !important; border-color:var(--hk-bordure) !important;
+  font-size:12.5px !important; }
+
+/* ---------------------------------------------------------------------
+   Indicateurs cles (KPI) : label discret, valeur en avant, alignement
+   strict quel que soit le nombre de cartes affichees.
+   ------------------------------------------------------------------ */
+/* Bandeau d'indicateurs : une grille fixe a 3 colonnes (jamais un
+   flex-wrap dont les rangees varient avec la largeur d'ecran), une seule
+   bordure d'ensemble et un simple filet entre cellules - un en-tete
+   d'information compact, jamais une rangee de cartes qui reclament
+   chacune de l'attention. */
+.bandeau-indicateurs { display:grid; grid-template-columns:repeat(3, 1fr); border:1px solid var(--hk-bordure);
+  border-radius:var(--hk-rayon-carte); background:var(--hk-carte); overflow:hidden; margin-bottom:16px; }
+@media (max-width: 720px) { .bandeau-indicateurs { grid-template-columns:repeat(2, 1fr); } }
+.stat { padding:9px 16px; display:flex; align-items:baseline; gap:8px; white-space:nowrap;
+  border-top:1px solid var(--hk-bordure); border-right:1px solid var(--hk-bordure); margin-top:-1px; }
+.stat:nth-child(-n+3) { border-top:none; margin-top:0; }
+.stat:nth-child(3n) { border-right:none; }
+.stat .l { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--hk-texte-doux);
+  font-weight:700; }
+.stat .v { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:15px; font-weight:600;
+  color:var(--hk-texte); margin-left:auto; }
+/* Variante avec pastille icone (refonte visuelle - etape 3,
+   composants.py::stat()) : n'affecte que les indicateurs qui passent un
+   icone= - b_stats() (app.py) n'a pas encore ete migree a cette etape,
+   ses .stat existants (sans icone) restent inchanges. */
+.stat.stat-avec-icone { align-items:center; gap:10px; }
+.stat-icone { width:32px; height:32px; border-radius:50%; background:var(--hk-primaire-clair);
+  color:var(--hk-primaire); display:flex; align-items:center; justify-content:center; font-size:14px;
+  flex:none; }
+.stat-texte { display:flex; flex-direction:column; gap:2px; flex:1 1 auto; min-width:0; }
+.stat-avec-icone .l { font-size:10.5px; }
+.stat-avec-icone .v { margin-left:0; }
+
+/* ---------------------------------------------------------------------
+   Panneau de filtres (refonte visuelle - etape 3, composants.py::
+   filtres()/filtre()). Pas encore utilise a cette etape : les filtres
+   actuels (Brouillard, Export Sage) restent poses directement sur la
+   carte blanche jusqu'a leur propre etape.
+   ------------------------------------------------------------------ */
+.hk-filtres { background:var(--hk-filtres); border-radius:var(--hk-rayon-champ);
+  padding:var(--hk-espace-3) var(--hk-espace-4); display:flex; flex-wrap:wrap;
+  gap:var(--hk-espace-4); margin-bottom:16px; }
+.hk-filtre { flex:1 1 200px; min-width:0; }
+.hk-filtre + .hk-filtre { border-left:1px solid var(--hk-bordure); padding-left:var(--hk-espace-4); }
+.hk-filtre .form-group, .hk-filtre .shiny-input-container { margin-bottom:0; }
+
+/* Une periode a besoin d'environ deux fois la place d'un select simple :
+   deux champs date + deux boutons calendrier + le separateur " au ". */
+.hk-filtre:has(.shiny-date-range-input) { flex:2 1 320px; }
+
+.hk-filtre .shiny-date-range-input .form-control {
+  padding-left:8px;
+  padding-right:8px;
+  /* sans min-width:0, l'input-group reduit les champs avant les addons :
+     ce sont les dates qui disparaissent, jamais les icones. */
+  min-width:0;
+}
+
+.hk-filtre .shiny-date-range-input .input-group-addon,
+.hk-filtre .shiny-date-range-input .input-group-text {
+  padding:0 6px;
+}
+
+/* ---------------------------------------------------------------------
+   Boutons : hierarchie nette entre action principale, secondaire et
+   destructive - jamais une rangee de boutons uniformes.
+   ------------------------------------------------------------------ */
+.btn { border-radius:var(--hk-rayon-champ); font-weight:600; font-size:13.5px; padding:8px 16px;
+  transition:background .12s, border-color .12s, box-shadow .12s; box-shadow:none; }
+.btn:focus, .btn:focus-visible { box-shadow:0 0 0 3px var(--hk-primaire-clair) !important; }
+.btn-primary { background:var(--hk-primaire); border-color:var(--hk-primaire); }
+.btn-primary:hover { background:var(--hk-primaire-fonce); border-color:var(--hk-primaire-fonce); }
+.btn-sm { padding:5px 13px; font-size:12.5px; }
+/* btn-discret et btn-danger-discret ne sont pas des variantes Bootstrap : sans
+   ces trois variables, l'etat "presse" (:active) retombe sur la regle
+   ".btn-outline-default, .btn-default:not(.btn-primary, ...)" de bootstrap.min.css
+   (--bs-btn-active-bg sur un gris tres fonce, valeur par defaut de Bootstrap).
+   Cette regle a une specificite de (0,2,0) a cause du :not() - plus elevee que
+   ".btn-discret" seul (0,1,0) - donc elle gagne quand meme sans !important,
+   d'ou un flash sombre et brutal a chaque clic sur "Vider", "Supprimer", etc.
+   On aligne l'etat presse sur l'etat survol pour rester dans les tons
+   discrets voulus. */
+.btn-discret { background:var(--hk-carte); border:1px solid var(--hk-bordure); color:var(--hk-texte-doux);
+  --bs-btn-active-bg:var(--hk-fond) !important; --bs-btn-active-color:var(--hk-texte) !important;
+  --bs-btn-active-border-color:var(--hk-bordure-forte) !important; }
+.btn-discret:hover { background:var(--hk-fond); border-color:var(--hk-bordure-forte); color:var(--hk-texte); }
+.btn-danger-discret { background:var(--hk-carte); border:1px solid var(--hk-bordure); color:var(--hk-erreur);
+  --bs-btn-active-bg:var(--hk-erreur-clair) !important; --bs-btn-active-color:var(--hk-erreur) !important;
+  --bs-btn-active-border-color:var(--hk-erreur) !important; }
+.btn-danger-discret:hover { background:var(--hk-erreur-clair); border-color:var(--hk-erreur); }
+
+/* Barre d'actions compacte au-dessus d'un tableau : action principale
+   pleine, action secondaire discrete, aide alignee a droite. */
+.barre-actions { display:flex; align-items:center; gap:8px; margin:-4px 0 16px 0; flex-wrap:wrap; }
+.barre-actions .aide { margin-left:auto; font-size:12px; color:var(--hk-neutre); font-style:italic; }
+
+/* ---------------------------------------------------------------------
+   Nouveaux boutons hk-btn-* (refonte visuelle - etape 3). Coexistent avec
+   .btn-primary/.btn-discret/.btn-danger-discret ci-dessus : ces classes
+   ne sont pas retirees (encore utilisees partout dans l'appli), le
+   remplacement se fait page par page aux etapes suivantes. S'appliquent
+   aussi bien a un <button> (ui.input_action_button) qu'a un <a>
+   (ui.download_button) - cf. e_txt/e_xlsx a l'etape Export Sage.
+   ------------------------------------------------------------------ */
+a.hk-btn-primaire, a.hk-btn-secondaire, a.hk-btn-danger { text-decoration:none; }
+.hk-btn-primaire, .hk-btn-secondaire, .hk-btn-danger { display:inline-flex; align-items:center;
+  justify-content:center; gap:8px; height:var(--hk-bouton-hauteur); padding:0 20px;
+  border-radius:var(--hk-rayon-champ); font-weight:600; font-size:13.5px; box-shadow:none;
+  transition:background .12s, border-color .12s, box-shadow .12s; }
+.hk-btn-primaire i, .hk-btn-secondaire i, .hk-btn-danger i { font-size:16px; }
+.hk-btn-primaire:focus, .hk-btn-secondaire:focus, .hk-btn-danger:focus,
+.hk-btn-primaire:focus-visible, .hk-btn-secondaire:focus-visible, .hk-btn-danger:focus-visible {
+  box-shadow:0 0 0 3px var(--hk-primaire-clair) !important; }
+.hk-btn-primaire { background:var(--hk-primaire); border:none; color:var(--hk-blanc); }
+.hk-btn-primaire:hover { background:var(--hk-primaire-fonce); color:var(--hk-blanc); }
+.hk-btn-secondaire { background:var(--hk-carte); border:1px solid var(--hk-bordure); color:var(--hk-texte);
+  --bs-btn-active-bg:var(--hk-fond) !important; --bs-btn-active-color:var(--hk-texte) !important;
+  --bs-btn-active-border-color:var(--hk-bordure-forte) !important; }
+.hk-btn-secondaire:hover { background:var(--hk-fond); border-color:var(--hk-bordure-forte); color:var(--hk-texte); }
+.hk-btn-danger { background:var(--hk-carte); border:1px solid var(--hk-bordure); color:var(--hk-erreur);
+  --bs-btn-active-bg:var(--hk-erreur-clair) !important; --bs-btn-active-color:var(--hk-erreur) !important;
+  --bs-btn-active-border-color:var(--hk-erreur) !important; }
+.hk-btn-danger:hover { background:var(--hk-erreur-clair); border-color:var(--hk-erreur); }
+
+/* ---------------------------------------------------------------------
+   Encadre "Informations" (refonte visuelle - etape 3,
+   composants.py::hk_info()). Pas encore utilise a cette etape.
+   ------------------------------------------------------------------ */
+.hk-info { background:var(--hk-primaire-clair); border-radius:var(--hk-rayon-champ);
+  padding:var(--hk-espace-3); }
+.hk-info-entete { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.hk-info-icone { width:20px; height:20px; border-radius:50%; background:var(--hk-primaire);
+  color:var(--hk-blanc); display:flex; align-items:center; justify-content:center; font-size:11px;
+  flex:none; }
+.hk-info-titre { font-size:14px; font-weight:700; color:var(--hk-texte); }
+.hk-info ul { margin:0; padding-left:18px; }
+.hk-info li { font-size:13px; color:var(--hk-texte-doux); line-height:1.5; }
+
+/* ---------------------------------------------------------------------
+   Badge de statut pilule (refonte visuelle - etape 3,
+   composants.py::badge_statut()). Distinct de .cell-statut-* ci-dessus
+   (deja utilise pour styler des cellules de tableau) : les deux
+   coexistent tant que badge_statut() n'est pas cablee dans un tableau.
+   ------------------------------------------------------------------ */
+.hk-badge { display:inline-block; border-radius:var(--hk-rayon-pilule); font-size:12px;
+  font-weight:600; padding:4px 10px; line-height:1.3; }
+.hk-badge--attente { background:var(--hk-primaire-clair); color:var(--hk-primaire); }
+.hk-badge--valide { background:var(--hk-succes-clair); color:var(--hk-succes); }
+.hk-badge--exporte { background:var(--hk-neutre-clair); color:var(--hk-neutre); }
+.hk-badge--erreur { background:var(--hk-erreur-clair); color:var(--hk-erreur); }
+
+/* Disclosure progressif sur les listes longues du Referentiel : le lien
+   "Afficher tout" ne fait rien d'autre que basculer une valeur reactive,
+   c'est le rendu Python qui decide combien de lignes partent au navigateur. */
+.lien-etendre { display:block; margin-top:8px; font-size:12.5px; }
+
+/* Tableau de repartition (mois/nature/montant) du modele "Encaissement" :
+   largeurs de colonnes fixes pour qu'il ne deborde jamais de sa carte,
+   quel que soit le texte choisi (ex. "Solde / Retard") ou le nombre de
+   lignes ajoutees via "+ Ajouter un mois". Classe dediee : ne touche pas
+   au tableau "apercu" de l'ecriture generee (colonnes differentes). */
+table.apercu-repartition { table-layout:fixed; }
+table.apercu-repartition th:nth-child(1), table.apercu-repartition td:nth-child(1) { width:29%; }
+table.apercu-repartition th:nth-child(2), table.apercu-repartition td:nth-child(2) { width:31%; }
+table.apercu-repartition th:nth-child(3), table.apercu-repartition td:nth-child(3) { width:26%; }
+table.apercu-repartition th:nth-child(4), table.apercu-repartition td:nth-child(4) { width:14%; }
+table.apercu-repartition select, table.apercu-repartition input.form-control { min-width:0; }
+
+/* Tableau de repartition : la colonne est deja intitulee MONTANT,
+   la pastille "F CFA" n'apporte rien et mange 70px sur un champ de 102px.
+   Corrige le 13/09/2026 : le selectif ci-dessous doit reprendre EXACTEMENT
+   le ":has(...)" de la regle .grille-saisie (ligne ~338), sinon sa
+   specificite CSS plus faible perd face a elle (les deux tableaux vivent
+   dans .grille-saisie) et la pastille "F CFA" continuait de s'afficher,
+   masquant une partie du montant saisi. */
+.apercu-repartition .shiny-input-container:has(> input[type="number"])::after { content:none; }
+
+.apercu-repartition input[type="number"] {
+  padding-right:12px;
+  text-align:right;
+}
+
+/* Colonnes assez larges pour "SEPTEMBRE" et pour un montant a 7 chiffres. */
+.apercu-repartition td:nth-child(1) { min-width:150px; }  /* Mois */
+.apercu-repartition td:nth-child(3) { min-width:130px; }  /* Montant */
+
+/* ---------------------------------------------------------------------
+   Page de connexion
+   ------------------------------------------------------------------ */
+.connexion { max-width:400px; margin:9vh auto; }
+.connexion .carte { box-shadow:var(--hk-ombre-large); border-top:3px solid var(--hk-primaire); }
+
+/* ---------------------------------------------------------------------
+   Assistant IA (composant shinychat) : reprend les couleurs de marque au
+   lieu du bleu Bootstrap par defaut, via les variables CSS que le
+   composant expose lui-meme - jamais de contournement en !important.
+   ------------------------------------------------------------------ */
+shiny-chat-container {
+  --bs-primary: var(--hk-primaire); --bs-primary-rgb: 26, 95, 208;
+  --shiny-chat-border: 1px solid var(--hk-bordure);
+  --shiny-chat-user-message-bg: var(--hk-primaire-clair);
+}

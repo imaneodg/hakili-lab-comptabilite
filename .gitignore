@@ -5,6 +5,11 @@ env/
 
 # Variables et secrets
 .env
+# Le depot est public : tout fichier d'environnement, quel que soit son
+# emplacement ou son nom, reste hors de Git. "Claude outputs/env" contenait
+# le mot de passe Postgres de production en clair (13/09/2026).
+**/env
+*.env
 
 # Python
 __pycache__/
@@ -14,7 +19,7 @@ __pycache__/
 .vscode/
 .idea/
 
-# Système
+# Systï¿½me
 .DS_Store
 Thumbs.db
 
@@ -23,3 +28,20 @@ Thumbs.db
 
 # Sauvegardes PostgreSQL
 backup/sauvegardes/
+
+# Certificats TLS (docker-compose.yml / nginx/hakili.conf)
+nginx/certs/*.pem
+
+# Donnees reelles et documents de travail - jamais sur un depot public.
+# Les brouillards contiennent les noms des eleves et des fournisseurs
+# (donnees personnelles) ; "Claude outputs/" contient des rapports d'audit
+# et un fichier d'environnement avec des identifiants.
+BROUILLARD_*.xlsx
+Claude outputs/
+
+# Graphiques generes a l'execution par l'assistant IA (jamais du code source)
+www/graphiques/
+
+# Fichiers locaux de l'editeur et copies de sauvegarde manuelles
+*.code-workspace
+backup/app_avant_*.py
