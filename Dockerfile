@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY app.py .
 COPY chat_config.py .
+COPY composants.py .
 COPY logic ./logic
 COPY sql ./sql
 COPY mcp_server ./mcp_server
