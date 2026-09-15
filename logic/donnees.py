@@ -756,8 +756,33 @@ def valider_pieces(ids, utilisateur):
 
 
 def rejeter_pieces(ids, motif, utilisateur):
+    """Renvoie des pieces au centre pour correction.
+
+    Une piece deja EXPORTEE ne peut plus etre renvoyee (corrige le
+    15/09/2026). L'ancienne version ne regardait aucun statut : une piece
+    figurant deja dans un fichier importe dans Sage repassait en
+    'a_corriger', revenait dans le brouillard de la caissiere, etait
+    corrigee et reenregistree - l'operation se retrouvait comptabilisee
+    deux fois dans le livre officiel, sans le moindre message pour le
+    signaler. Elle gardait au passage son num_definitif, son valide_par et
+    son exporte_le, ce qui rendait la piste d'audit incoherente : une piece
+    "exportee le..." et "a corriger" en meme temps.
+
+    Une piece 'validee' reste renvoyable : le comptable a le droit de se
+    raviser tant que l'export n'a pas eu lieu. Apres l'export, la correction
+    passe par une ecriture d'extourne, jamais par une reprise de la piece.
+    """
     with _connexion() as c, c.cursor() as cur:
         ids = avec_liees(ids)
+        cur.execute("SELECT DISTINCT statut FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
+        statuts = {r[0] for r in cur.fetchall()}
+        if not statuts:
+            raise ValueError("Piece introuvable.")
+        if "exportee" in statuts:
+            raise ValueError(
+                "Une piece deja exportee vers Sage ne peut plus etre renvoyee pour "
+                "correction : elle est deja dans le livre officiel. Corriger par une "
+                "ecriture d'extourne.")
         cur.execute(
             "UPDATE ecritures SET statut = 'a_corriger', observation = %s WHERE id_piece = ANY(%s)",
             (f"{utilisateur} : {motif}", ids))
@@ -768,12 +793,36 @@ def rejeter_pieces(ids, motif, utilisateur):
 
 
 def marquer_exporte(ids):
+    """Marque 'exportee' les seules pieces reellement exportables.
+
+    Le filtre "AND statut = 'validee'" est ajoute le 15/09/2026. Sans lui,
+    n'importe quelle piece de la liste basculait a 'exportee' - y compris
+    une piece encore 'saisie'. Le cas se produisait par avec_liees() : la
+    jumelle d'une piece liee pouvait etre restee en attente pendant que
+    l'autre etait validee. a_exporter() ne retenant que les pieces
+    'validee', cette jumelle n'etait dans AUCUN fichier Sage, mais elle
+    disparaissait quand meme de la file de validation. Plus personne ne la
+    traitait, et elle n'existait nulle part ailleurs : la piece s'evaporait.
+
+    Renvoie le nombre de pieces reellement marquees. L'ancienne version
+    journalisait len(ids), donc un chiffre qui pouvait etre faux.
+    """
     with _connexion() as c, c.cursor() as cur:
         ids = avec_liees(ids)
         cur.execute(
-            "UPDATE ecritures SET statut = 'exportee', exporte_le = now() WHERE id_piece = ANY(%s)",
+            "UPDATE ecritures SET statut = 'exportee', exporte_le = now() "
+            "WHERE id_piece = ANY(%s) AND statut = 'validee' "
+            "RETURNING id_piece",
             (ids,))
-    logger.info("%s piece(s) marquee(s) exportee(s) vers Sage.", len(ids))
+        marquees = {r[0] for r in cur.fetchall()}
+    n = len(marquees)
+    if n < len(ids):
+        logger.warning(
+            "%s piece(s) marquee(s) exportee(s) vers Sage sur %s demandee(s) : "
+            "les autres n'etaient pas au statut 'validee'.", n, len(ids))
+    else:
+        logger.info("%s piece(s) marquee(s) exportee(s) vers Sage.", n)
+    return n
 
 
 # --- solde de caisse -------------------------------------------------------------

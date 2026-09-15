@@ -1560,9 +1560,24 @@ def server(input, output, session):
             return ui.div({"class": "ruban ok"}, ui.HTML(prefixe + "Prete a etre enregistree."))
         return ui.div({"class": "ruban ok"}, ui.HTML(prefixe + " ; ".join(morceaux) + "."))
 
+    # Le bouton est desactive pendant tout le traitement (15/09/2026) : sur un
+    # poste de caisse lent, un double-clic enregistrait DEUX pieces completes,
+    # avec deux numeros et deux mouvements de caisse. Rien ne permettait de
+    # les rattraper ensuite - prises une a une, les deux pieces sont
+    # irreprochables, et controler() ne detecte pas un doublon exact. Le solde
+    # restait faux jusqu'a ce que quelqu'un s'en apercoive. _ajouter_compte et
+    # _ajouter_utilisateur avaient deja ce filet, pour des operations pourtant
+    # bien moins sensibles.
     @reactive.effect
     @reactive.event(input.m_enregistrer)
     def _enregistrer():
+        ui.update_action_button("m_enregistrer", disabled=True)
+        try:
+            _enregistrer_piece()
+        finally:
+            ui.update_action_button("m_enregistrer", disabled=False)
+
+    def _enregistrer_piece():
         if not equilibree():
             ui.notification_show("Opération déséquilibrée ou incomplète.", type="error")
             return
@@ -1861,12 +1876,31 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.b_supprimer)
     def _supprimer():
+        # Controle de centre cote serveur, ajoute le 15/09/2026. Cette
+        # fonction n'en avait aucun, alors que _valider et _rejeter en ont un
+        # depuis le 11/09 : b_table ne montre que les pieces du centre
+        # connecte, mais masquer une ligne cote client n'est pas un controle
+        # d'acces (voir _hors_centre()).
+        #
+        # Le point sensible est supprimer_piece(), qui elargit aux pieces
+        # liees : un approvisionnement relie deux pieces qui appartiennent a
+        # deux centres differents. Supprimer sa moitie emportait donc celle de
+        # l'autre centre. La selection est pour cette raison elargie ICI,
+        # avant le controle, jamais apres - meme ordre que dans _valider.
+        u = util()
+        if u is None:
+            return
         sel = b_table.data_view(selected=True)
         if len(sel) == 0 or "Message" in sel.columns:
             ui.notification_show("Choisir d'abord une pièce.", type="warning")
             return
+        d = donnees()
+        ids = dl.avec_liees(list(sel.index), d)
+        if not est_comptable() and _hors_centre(ids, d, u):
+            ui.notification_show("Ces pieces appartiennent a un autre centre.", type="error")
+            return
         try:
-            dl.supprimer_piece(list(sel.index), util()["identifiant"])
+            dl.supprimer_piece(ids, u["identifiant"])
         except Exception as e:
             ui.notification_show(str(e), type="error")
         else:
@@ -2062,9 +2096,17 @@ def server(input, output, session):
         if not motif or not str(motif).strip():
             ui.notification_show("Indiquer le motif du renvoi.", type="warning")
             return
-        ids = list(sel.index)
-        # Meme filet que _valider : un validateur local ne peut renvoyer que
-        # les pieces de son propre centre.
+        # avec_liees() AVANT le controle de centre (corrige le 15/09/2026).
+        # _valider le faisait deja ; ici, la liste brute etait controlee puis
+        # transmise a rejeter_pieces(), qui elargit aux pieces liees en
+        # interne - donc APRES le controle. Un validateur local pouvait ainsi
+        # selectionner une piece de son centre liee a une piece d'un autre
+        # centre : _hors_centre ne voyait que la sienne et laissait passer,
+        # puis la piece de l'autre centre repassait en 'a_corriger'. Le
+        # cloisonnement corrige le 11/09 etait contourne par la porte de
+        # service, et le test d'autorisation ne le voyait pas (il verifie que
+        # _hors_centre est appelee, pas sur quoi).
+        ids = dl.avec_liees(list(sel.index), donnees())
         if not est_comptable() and _hors_centre(ids, donnees(), util()):
             ui.notification_show("Ces pieces appartiennent a un autre centre.", type="error")
             return
@@ -2226,11 +2268,19 @@ def server(input, output, session):
             return
         ids = list(dict.fromkeys(d["id_piece"]))
         try:
-            dl.marquer_exporte(ids)
+            n = dl.marquer_exporte(ids)
         except Exception as e:
             ui.notification_show(str(e), type="error")
             return
-        ui.notification_show(f"{len(ids)} piece(s) marquee(s) comme exportee(s)", type="message")
+        # marquer_exporte ne marque que les pieces 'validee' et renvoie le
+        # nombre reel : on annonce ce chiffre, pas len(ids), et on signale
+        # l'ecart plutot que de le passer sous silence.
+        if n < len(ids):
+            ui.notification_show(
+                f"{n} piece(s) marquee(s) comme exportee(s) sur {len(ids)} : les autres "
+                "n'etaient pas validees et restent en attente.", type="warning", duration=None)
+        else:
+            ui.notification_show(f"{n} piece(s) marquee(s) comme exportee(s)", type="message")
         rafraichir()
 
     # ---------------- controles et referentiel --------------------------------
@@ -2388,10 +2438,29 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.c_attribuer)
     def _attribuer():
+        # PAS de garde de role ici, et c'est delibere : decision metier
+        # confirmee le 10/09/2026 (voir l'en-tete de
+        # tests/test_authorisation.py). L'onglet Controles est accessible aux
+        # caissieres, et le compte d'attente 471000 sert justement aux
+        # encaissements qu'on n'a pas su classer sur le moment - c'est la
+        # caissiere qui sait a quoi l'argent correspondait. Exiger un
+        # validateur l'obligerait a rappeler le comptable pour chaque cas.
+        #
+        # En revanche le CENTRE est controle (ajoute le 15/09/2026) : c_table
+        # ne montre que les anomalies du centre connecte, mais masquer une
+        # ligne cote client n'est pas un controle d'acces - meme raisonnement
+        # que _valider, _rejeter et _supprimer. Reclasser reste donc libre
+        # dans son propre centre, et impossible dans celui d'un autre.
+        u = util()
+        if u is None:
+            return
         sel = c_table.data_view(selected=True)
         if len(sel) == 0 or sel.index[0] is None:
             return
         idp = sel.index[0]
+        if not est_comptable() and _hors_centre([idp], donnees(), u):
+            ui.notification_show("Cette piece appartient a un autre centre.", type="error")
+            return
         compte = get_input("c_compte")
         if not compte:
             ui.notification_show("Choisir un compte.", type="warning")
@@ -2669,11 +2738,26 @@ def server(input, output, session):
     # jamais cet onglet.
     @reactive.effect
     async def _connecter_mcp():
-        if not peut_voir_assistant() or mcp_connecte():
+        if not peut_voir_assistant():
             return
-        # Verrou pose AVANT l'await : une seconde execution de cet effet pendant
-        # que la connexion est en cours doit sortir immediatement.
-        mcp_connecte.set(True)
+        # Lecture ISOLEE de mcp_connecte (corrige le 15/09/2026). Avant, cet
+        # effet DEPENDAIT de mcp_connecte, et la branche d'erreur le remettait
+        # a False "pour rouvrir la porte" - ce qui invalidait sa propre
+        # dependance et le relancait. Il echouait de nouveau, remettait False,
+        # repartait : boucle infinie. Observe le 15/09, quand le paquet
+        # anthropic manquait dans l'image : un bandeau rouge par tour, et
+        # surtout un sous-processus MCP lance a chaque tentative, aucun jamais
+        # arrete. Le serveur accumulait processus et connexions Postgres tant
+        # que l'onglet restait ouvert.
+        #
+        # Isoler la lecture supprime la dependance : le .set() ci-dessous ne
+        # peut plus declencher quoi que ce soit. Le verrou est pose AVANT
+        # l'await, pour qu'une seconde execution pendant la connexion sorte
+        # immediatement.
+        with reactive.isolate():
+            if mcp_connecte():
+                return
+            mcp_connecte.set(True)
         try:
             # Portee de la session, transmise au sous-processus MCP (voir
             # mcp_server/portee.py). Un sous-processus par session Shiny :
@@ -2698,11 +2782,39 @@ def server(input, output, session):
             # DATABASE_URL non lue par ce sous-processus...) : journalise
             # pour le diagnostic, et signale a l'utilisateur au lieu de
             # laisser planter silencieusement l'onglet Assistant.
-            mcp_connecte.set(False)  # rouvre la porte : la connexion a echoue
+            # On ne remet PAS mcp_connecte a False : une seule tentative par
+            # session (voir le commentaire de la boucle plus haut). L'onglet
+            # reste utilisable, l'assistant seul est indisponible.
             dl.logger.error("Echec de connexion au serveur MCP : %s", e)
-            ui.notification_show(
-                "Assistant IA indisponible pour le moment (connexion au serveur d'analyse impossible).",
-                type="error")
+            # Le message distingue une dependance absente d'une vraie panne
+            # reseau. Le 15/09, "connexion au serveur d'analyse impossible"
+            # s'affichait alors que le paquet anthropic manquait simplement
+            # dans l'image : impossible de deviner sans lire le journal.
+            if isinstance(e, ImportError) or "install" in str(e).lower():
+                message = ("Assistant IA indisponible : une dépendance manque dans "
+                           "l'installation du serveur. Prévenir l'administrateur "
+                           "(le détail est dans le journal de l'application).")
+            else:
+                message = ("Assistant IA indisponible pour le moment "
+                           "(connexion au serveur d'analyse impossible).")
+            ui.notification_show(message, type="error")
+
+    # Le sous-processus MCP lancé par _connecter_mcp n'était jamais arrêté
+    # (15/09/2026) : chaque connexion du comptable laissait derrière elle un
+    # processus Python vivant, avec son propre pool de connexions Postgres.
+    # Sur une journée, autant de processus et de pools que de connexions
+    # successives - le serveur atteignait max_connections avant de manquer de
+    # mémoire.
+    @session.on_ended
+    async def _fermer_mcp():
+        with reactive.isolate():
+            client = chat_client_val()
+        if client is None:
+            return
+        try:
+            await client.cleanup_mcp_tools()
+        except Exception as e:
+            dl.logger.warning("Fermeture du serveur MCP en fin de session : %s", e)
 
     # ContentToolResult.name est une propriete calculee qui LEVE une
     # ValueError tant que le resultat n'est pas rattache a sa requete d'outil
