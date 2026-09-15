@@ -9,7 +9,7 @@ psycopg2-binary==2.9.12
 openpyxl==3.1.5
 python-dotenv==1.2.3
 mcp==1.29.1
-chatlas==0.23.0
+chatlas[anthropic]==0.23.0
 
 # Graphiques de l'assistant IA (voir logic/graphiques.py) : rendu PNG statique
 # cote serveur uniquement, jamais de composant interactif dans le chat.

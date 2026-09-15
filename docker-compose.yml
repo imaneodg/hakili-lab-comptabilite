@@ -1,44 +1,80 @@
 # ---------------------------------------------------------------------------
-# Orchestration de production : app Shiny + reverse proxy TLS.
+# Orchestration de production : PostgreSQL + application Shiny.
 #
-# Postgres n'est PAS inclus ici : la base Hakili_compta reste geree par le
-# service Postgres deja en place (local ou serveur dedie) - DATABASE_URL
-# dans .env pointe simplement vers elle. Inclure Postgres dans ce compose
-# n'apporterait rien tant que la decision sur l'architecture des 5 centres
-# (bases locales synchronisees ou connexion directe a une base centrale)
-# n'est pas tranchee.
+# Ce fichier decrit la production REELLE (serveur 167.233.234.219). Il a ete
+# realigne le 15/09/2026 sur ce qui tournait effectivement : la version
+# precedente du depot annoncait deux services (app + nginx), sans base, et
+# publiait l'application sur le port 8000 - ni l'un ni l'autre n'etait exact.
+# L'ecart entre ce fichier et la machine est ce qui avait rendu les mises a
+# jour hasardeuses : on ne deploie bien que ce qu'on decrit fidelement.
 #
-# Usage :
-#   1. Completer .env (voir .env.example) a la racine du projet.
-#   2. Mettre un vrai certificat dans nginx/certs/ (voir nginx/hakili.conf)
-#      ou passer par un reverse proxy externe deja equipe (Caddy, Traefik,
-#      un load balancer manage...) et sauter le service nginx ci-dessous.
-#   3. docker compose up -d --build
+# Le serveur heberge une douzaine d'applications : le port 8000 appartient a
+# "guichet-entrepreneur", d'ou le choix du 8022 ici et dans le Dockerfile.
+#
+# Le reverse proxy TLS n'est pas dans ce fichier : il est assure par le nginx
+# de l'hote, mutualise entre toutes les applications du serveur, et configure
+# par l'administrateur de la machine.
 # ---------------------------------------------------------------------------
 
 services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Joues UNIQUEMENT a la creation d'un volume vide (mecanisme
+      # docker-entrypoint-initdb.d de l'image postgres) : sur une base deja
+      # initialisee, modifier ces deux fichiers n'a aucun effet. Les
+      # evolutions de schema passent donc par sql/migrations/, jamais par une
+      # retouche de schema.sql en esperant qu'elle soit rejouee.
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/1_schema.sql:ro
+      - ./sql/seed.sql:/docker-entrypoint-initdb.d/2_seed.sql:ro
+    ports:
+      # 127.0.0.1 et non 0.0.0.0 (corrige le 15/09/2026) : la version
+      # precedente exposait PostgreSQL sur TOUTES les interfaces reseau,
+      # c'est-a-dire ouvert a Internet sur 167.233.234.219:5432. Toute la
+      # comptabilite etait alors accessible sans passer par l'application,
+      # derriere le seul mot de passe de hakili_admin, sur un port que les
+      # robots balaient en permanence.
+      #
+      # L'application n'a jamais eu besoin de cette publication : elle joint
+      # la base par le reseau interne de Docker, sous le nom "db" (voir
+      # DATABASE_URL ci-dessous). Ne reste ici qu'un acces depuis la machine
+      # elle-meme, utile pour psql et pour un tunnel SSH.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   app:
     build: .
     restart: unless-stopped
     env_file: .env
-    expose:
-      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:8022:8022"
     volumes:
       - ./backup/sauvegardes:/app/backup/sauvegardes
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8022')"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  nginx:
-    image: nginx:1.27-alpine
-    restart: unless-stopped
-    depends_on:
-      - app
-    ports:
-      - "443:443"
-      - "80:80"
-    volumes:
-      - ./nginx/hakili.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+volumes:
+  pgdata:
+    # external : le volume existe deja et n'est jamais recree par compose.
+    # C'est ce qui protege les donnees d'un "docker compose down -v" lance
+    # par inadvertance.
+    external: true
+    name: hakili_gestion_caisse_pgdata
