@@ -749,3 +749,26 @@ shiny-chat-container {
   --shiny-chat-border: 1px solid var(--hk-bordure);
   --shiny-chat-user-message-bg: var(--hk-primaire-clair);
 }
+
+/* ---------------------------------------------------------------------
+   Bouton "afficher le code" sur les champs de code d'acces (connexion et
+   creation d'utilisateur). Pose cote client par JS_OEIL_CODE dans app.py.
+
+   Meme technique que le suffixe "F CFA" des champs de montant plus haut :
+   le conteneur genere par ui.input_password() recoit position:relative et
+   le bouton s'y ancre par le BAS, jamais par le milieu - le conteneur
+   inclut le <label>, donc top:50% tomberait au-dessus du champ. L'input
+   lui-meme n'est ni deplace ni enveloppe, pour ne pas toucher a sa
+   liaison Shiny.
+   ------------------------------------------------------------------ */
+.hk-champ-code { position:relative; }
+.hk-champ-code input.form-control { padding-right:46px; }
+.hk-oeil {
+  position:absolute; right:1px; bottom:1px;
+  width:44px; height:calc(var(--hk-champ-hauteur) - 2px);
+  display:flex; align-items:center; justify-content:center;
+  border:0; background:transparent; cursor:pointer; padding:0;
+  color:var(--hk-texte-doux); font-size:16px; line-height:1;
+  border-radius:0 var(--hk-rayon-champ) var(--hk-rayon-champ) 0; }
+.hk-oeil:hover { color:var(--hk-primaire); background:var(--hk-neutre-clair); }
+.hk-oeil:focus-visible { outline:2px solid var(--hk-primaire); outline-offset:-2px; }

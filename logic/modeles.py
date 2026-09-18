@@ -52,6 +52,29 @@ LIBELLES_NATURE_CA = {
 # "DE AVRIL").
 MOIS_AVEC_ELISION = ("AVRIL", "AOUT", "OCTOBRE")
 
+# Ordre de l'annee academique (septembre -> aout). Un reglement qui couvre
+# novembre, decembre et janvier doit se lire dans cet ordre ; l'ordre
+# calendaire de MOIS_FR placerait janvier en tete et donnerait un libelle
+# faux pour le comptable.
+MOIS_ANNEE_ACADEMIQUE = MOIS_FR[8:] + MOIS_FR[:8]
+
+# Abreviations de repli (voir _libelle_frais_ca). Trois lettres, sauf JUIN et
+# JUILLET qui partageraient "JUI" : deux mois differents ne doivent jamais
+# produire le meme libelle.
+ABREVIATIONS_MOIS = {
+    "JANVIER": "JAN", "FEVRIER": "FEV", "MARS": "MAR", "AVRIL": "AVR",
+    "MAI": "MAI", "JUIN": "JUIN", "JUILLET": "JUIL", "AOUT": "AOU",
+    "SEPTEMBRE": "SEP", "OCTOBRE": "OCT", "NOVEMBRE": "NOV", "DECEMBRE": "DEC",
+}
+
+# Forme courte de la nature, utilisee en dernier recours quand meme les
+# abreviations ne tiennent pas dans LIBELLE_MAX.
+BASES_COURTES_CA = {
+    "frais": "FRAIS CA",
+    "avance": "AVANCE CA",
+    "solde": "RATTRAPAGE CA",
+}
+
 
 # Retrouve le mois cite dans un libelle, qu'il suive l'ancien format
 # ("PREFIXE NOM/MOIS", suffixe teste en premier pour les pieces deja
@@ -65,14 +88,32 @@ def mois_depuis_libelle(libelle):
     m = re.search(r"/([A-ZÀ-Ü]+)\s*$", s)
     if m and m.group(1) in MOIS_FR:
         return m.group(1)
-    # "DE MOIS" / "D'MOIS" : plusieurs segments "DE ..."/"D'..." peuvent
-    # apparaitre avant le vrai mois (ex. "D'APPUI" dans la base du libelle),
-    # d'ou finditer() plutot que search() - seul le mois reconnu compte.
-    for m in re.finditer(r"\bD['’]([A-ZÀ-Ü]+)\b|\bDE\s+([A-ZÀ-Ü]+)\b", s):
-        mois = m.group(1) or m.group(2)
-        if mois in MOIS_FR:
-            return mois
-    return None
+    # Le nom du tiers, quand le libelle en porte un, suit " - " : on ne le
+    # scanne pas, un patronyme pourrait contenir un mot qui ressemble a un
+    # mois. Sur les libelles d'encaissement produits depuis le 18/09/2026 il
+    # n'y a de toute facon plus de nom sur les lignes 411.
+    tete = s.split(" - ")[0]
+    # Tout mois cite, d'ou qu'il vienne : "DE NOVEMBRE", "D'OCTOBRE", un mois
+    # nu au milieu d'une enumeration ("..., NOVEMBRE ET DECEMBRE"), ou une
+    # abreviation de la forme de repli ("OCT-NOV-DEC"). On retient le DERNIER :
+    # depuis la saisie multi-mois un libelle peut en citer plusieurs, et
+    # _libelle_frais_ca les ecrit dans l'ordre de l'annee academique, donc le
+    # dernier est bien le plus tardif - c'est lui qui sert a suggerer le mois
+    # suivant d'une avance.
+    #
+    # Les deux formes sont reconnues dans la MEME passe, et c'est essentiel :
+    # "MAI" et "JUIN" sont a la fois des noms complets et leur propre
+    # abreviation. Chercher d'abord tous les noms complets, puis seulement
+    # ensuite les abreviations, s'arretait sur eux et ne voyait jamais le
+    # "JUIL" ou le "AOU" qui suivait ("SEP-NOV-MAI-JUIL" renvoyait MAI).
+    inverse = {v: k for k, v in ABREVIATIONS_MOIS.items()}
+    trouves = []
+    for mot in re.findall(r"[A-ZÀ-Ü]+", tete):
+        if mot in MOIS_FR:
+            trouves.append(mot)
+        elif mot in inverse:
+            trouves.append(inverse[mot])
+    return trouves[-1] if trouves else None
 
 
 # Mois suivant dans le cycle calendaire (decembre boucle sur janvier).
@@ -142,13 +183,65 @@ def _de_mois(mois):
 # contrairement a _libelle_avec_mois) : un nom de tiers long tronque par
 # ligne() a LIBELLE_MAX n'ampute donc jamais la nature/le mois de
 # l'operation, seulement la fin du nom.
-def _libelle_frais_ca(nature, mois, nom):
+def mois_tries(mois):
+    """Mois reconnus, sans doublon, dans l'ordre de l'annee academique.
+
+    Accepte une chaine (un seul mois - forme des pieces enregistrees avant le
+    18/09/2026) aussi bien qu'une liste : les deux coexistent dans
+    ecritures.valeurs_json, et corriger une piece ancienne doit continuer a
+    fonctionner."""
+    if mois is None:
+        mois = []
+    elif isinstance(mois, str):
+        mois = [mois]
+    vus = []
+    for m in mois:
+        m = str(un(m, "")).strip().upper()
+        if m in MOIS_FR and m not in vus:
+            vus.append(m)
+    return sorted(vus, key=MOIS_ANNEE_ACADEMIQUE.index)
+
+
+def _enumeration_mois(liste):
+    """"DE NOVEMBRE", "DE NOVEMBRE ET DECEMBRE",
+    "D'OCTOBRE, NOVEMBRE ET DECEMBRE"."""
+    if len(liste) == 1:
+        return _de_mois(liste[0])
+    return ", ".join([_de_mois(liste[0])] + liste[1:-1]) + f" ET {liste[-1]}"
+
+
+def _abreviation_mois(liste):
+    return "-".join(ABREVIATIONS_MOIS[m] for m in liste)
+
+
+def _libelle_frais_ca(nature, mois):
+    """Libelle d'une ligne 411 du formulaire "encaissement".
+
+    Ne cite plus le nom de l'eleve (18/09/2026) : la ligne porte deja son
+    code tiers, qui l'identifie sans ambiguite dans Sage, et la place gagnee
+    sert a citer TOUS les mois couverts par le reglement. Le nom reste sur la
+    ligne de caisse, seule ligne de la piece sans code tiers (voir
+    _lignes_encaissement).
+
+    Trois formes essayees dans cet ordre, pour ne jamais depasser
+    LIBELLE_MAX : ligne() tronque par la droite, donc un libelle trop long
+    perdrait le dernier mois sans le moindre signal.
+        FRAIS DE COURS D'APPUI D'OCTOBRE, NOVEMBRE ET DECEMBRE   (54)
+        FRAIS DE COURS D'APPUI OCT-NOV-DEC                       (34)
+        FRAIS CA OCT-NOV-DEC                                     (20)
+    La troisieme tient toujours, meme pour six mois en "RATTRAPAGE"."""
+    liste = mois_tries(mois)
     base = LIBELLES_NATURE_CA.get(nature, LIBELLES_NATURE_CA["frais"])
-    libelle = f"{base} {_de_mois(mois)}"
-    nom = str(un(nom, "")).strip()
-    if nom:
-        libelle = f"{libelle} - {nom}"
-    return libelle
+    if not liste:
+        return base
+    courte = BASES_COURTES_CA.get(nature, BASES_COURTES_CA["frais"])
+    abrege = _abreviation_mois(liste)
+    for candidat in (f"{base} {_enumeration_mois(liste)}",
+                     f"{base} {abrege}",
+                     f"{courte} {abrege}"):
+        if len(candidat) <= LIBELLE_MAX:
+            return candidat
+    return f"{courte} {abrege}"
 
 
 def _df(*lignes_):
@@ -243,10 +336,12 @@ MODELES = [
             {"n": "montant", "l": "Montant total recu", "t": "montant"},
             {"n": "repartition", "l": "Repartition", "t": "repartition"},
         ],
-        # Libelle de la ligne de caisse pour un encaissement multi-operations
-        # (voir _lignes_encaissement) : pas de mois ici, une seule ligne ne
-        # peut pas resumer plusieurs mois/natures a la fois - le mois reste
-        # precise sur chaque ligne 411 de detail.
+        # Libelle de la ligne de caisse (voir _lignes_encaissement) : pas de
+        # mois ici, une seule ligne ne peut pas resumer plusieurs mois et
+        # natures a la fois - ils restent precises sur chaque ligne 411. Le
+        # nom de l'eleve, lui, y reste : c'est la seule ligne de la piece qui
+        # ne porte pas de code tiers, donc la seule ou le nom dit encore qui
+        # a paye (18/09/2026).
         "libelle": lambda v: f"FRAIS DE COURS D'APPUI - {v.get('tiers_nom', '')}",
         "lignes": lambda v, cc: _lignes_encaissement(v, cc),
     },
@@ -688,18 +783,24 @@ def _lignes_encaissement(v, cc):
     montant_total = float(un(v.get("montant"), 0) or 0)
     if montant_total <= 0:
         return None
+    # "mois" est une LISTE depuis le 18/09/2026 : une ligne de repartition
+    # peut couvrir plusieurs mois, et produit alors UNE seule ecriture 411
+    # dont le libelle les cite tous - c'est la facon de faire du comptable.
+    # mois_tries() accepte aussi l'ancienne forme (une chaine).
     repartition = [row for row in (v.get("repartition") or [])
-                   if float(un(row.get("montant"), 0) or 0) > 0 and str(un(row.get("mois"), "")).strip()]
+                   if float(un(row.get("montant"), 0) or 0) > 0 and mois_tries(row.get("mois"))]
     lignes_411 = []
     for row in repartition:
         montant = float(un(row.get("montant"), 0) or 0)
-        mois = str(un(row.get("mois"), "")).strip()
-        libelle = _libelle_frais_ca(row.get("nature"), mois, v.get("tiers_nom", ""))
+        libelle = _libelle_frais_ca(row.get("nature"), row.get("mois"))
         lignes_411.append(ligne("411000", libelle, credit=montant, code_tiers=v.get("tiers", "")))
     if not lignes_411:
         return None
-    lib_caisse = lignes_411[0]["libelle"] if len(lignes_411) == 1 else v["lib"]
-    return _df(ligne(cc, lib_caisse, debit=montant_total), *lignes_411)
+    # La ligne de caisse porte toujours le libelle global avec le nom, y
+    # compris quand il n'y a qu'une seule ligne 411 (change le 18/09/2026) :
+    # les lignes 411 ne citent plus le nom, donc reprendre leur libelle ici
+    # laisserait le brouillard de caisse sans aucune indication de qui a paye.
+    return _df(ligne(cc, v["lib"], debit=montant_total), *lignes_411)
 
 
 def _lignes_avance_paiement(v, cc):

@@ -93,6 +93,80 @@ document.addEventListener("shiny:value", function (e) {
 });
 """
 
+# Bouton "afficher le code" sur les deux champs de code d'acces : celui de la
+# connexion (l_code) et celui de la creation d'utilisateur
+# (r_code_utilisateur). Shiny n'a pas de bascule native sur input_password.
+#
+# L'input n'est JAMAIS deplace dans le DOM : seul son conteneur recoit une
+# classe, et le bouton s'y pose en absolu (meme technique que le suffixe
+# "F CFA" des champs de montant, cf. www/app.css). Deplacer l'element
+# casserait la liaison Shiny de l'input.
+#
+# Delegation sur "shiny:value" comme JS_DERNIER_CENTRE, parce que l'ecran de
+# connexion est re-rendu par le serveur a chaque affichage de page() : un
+# simple DOMContentLoaded ne verrait le champ qu'une fois. Le MutationObserver
+# couvre le panneau de creation d'utilisateur, rendu par render.ui.
+#
+# Le code se remasque tout seul apres 5 secondes et des que le champ perd le
+# focus : sur un poste de caisse partage, un code laisse lisible a l'ecran est
+# un code divulgue.
+JS_OEIL_CODE = """
+(function () {
+  var CIBLES = ["l_code", "r_code_utilisateur"];
+
+  function decorer(champ) {
+    if (!champ || champ.dataset.hkOeil === "1") return;
+    var boite = champ.parentNode;
+    if (!boite) return;
+    champ.dataset.hkOeil = "1";
+    boite.classList.add("hk-champ-code");
+
+    var bouton = document.createElement("button");
+    bouton.type = "button";
+    bouton.className = "hk-oeil";
+    bouton.tabIndex = -1;
+    boite.appendChild(bouton);
+
+    var minuteur = null;
+
+    function masquer() {
+      champ.type = "password";
+      bouton.innerHTML = '<i class="bi bi-eye"></i>';
+      bouton.setAttribute("aria-label", "Afficher le code");
+      if (minuteur) { clearTimeout(minuteur); minuteur = null; }
+    }
+
+    function afficher() {
+      champ.type = "text";
+      bouton.innerHTML = '<i class="bi bi-eye-slash"></i>';
+      bouton.setAttribute("aria-label", "Masquer le code");
+      if (minuteur) clearTimeout(minuteur);
+      minuteur = setTimeout(masquer, 5000);
+    }
+
+    masquer();
+    bouton.addEventListener("click", function (e) {
+      e.preventDefault();
+      if (champ.type === "password") { afficher(); } else { masquer(); }
+    });
+    champ.addEventListener("blur", masquer);
+  }
+
+  function balayer() {
+    for (var i = 0; i < CIBLES.length; i++) {
+      decorer(document.getElementById(CIBLES[i]));
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", balayer);
+  document.addEventListener("shiny:value", balayer);
+  if (window.MutationObserver) {
+    new MutationObserver(balayer).observe(document.documentElement,
+                                          { childList: true, subtree: true });
+  }
+})();
+"""
+
 # Forme decorative en fond de sidebar (refonte visuelle, etape 2 - coquille) :
 # une seule courbe pleine, tres transparente, purement ornementale - voir
 # .hk-vague dans www/app.css pour son positionnement (pointer-events:none,
@@ -113,7 +187,8 @@ app_ui = ui.page_fluid(
                  # tourne sur des postes de caisse qui peuvent perdre l'acces
                  # reseau, hors ligne toute la navigation deviendrait du texte nu.
                  ui.tags.link(rel="stylesheet", href="bootstrap-icons/bootstrap-icons.min.css"),
-                 ui.tags.script(ui.HTML(JS_DERNIER_CENTRE))),
+                 ui.tags.script(ui.HTML(JS_DERNIER_CENTRE)),
+                 ui.tags.script(ui.HTML(JS_OEIL_CODE))),
     ui.output_ui("page"),
 )
 
@@ -397,11 +472,29 @@ def server(input, output, session):
             value="brouillard", icon=ui.tags.i({"class": "bi bi-file-earmark-text"}),
         )
 
-    def onglet_validation():
-        # Filtres de la maquette (Periode, Journal, Centre, case "non
-        # validees") : aucun de ces inputs n'existe cote serveur, ce ne
-        # sont pas des filtres a inventer ici. Voir le rapport de refonte
-        # (bloc "elements de la maquette sans contrepartie").
+    def onglet_validation(r):
+        # Filtre "Centre" ajoute le 18/09/2026 a la demande du comptable : il
+        # valide centre par centre et voyait jusqu'ici les six melanges.
+        # Rendu au SEUL comptable du siege - un validateur local ne voit deja
+        # que son propre centre (voir attente()), le filtre n'aurait rien a
+        # filtrer chez lui.
+        #
+        # C'est un filtre d'AFFICHAGE, jamais un controle d'acces : _valider
+        # et _rejeter gardent leur _hors_centre, qui reste la seule barriere
+        # reelle. Masquer une ligne cote client n'a jamais protege personne.
+        #
+        # Les autres filtres de la maquette (Periode, Journal, case "non
+        # validees") n'ont toujours aucune contrepartie serveur et ne sont
+        # pas inventes ici.
+        barre = None
+        if est_comptable():
+            cx = r["centres"]
+            if "actif" in cx.columns:
+                cx = cx[cx["actif"].fillna("oui") == "oui"]
+            choix = {"Tous": "Tous les centres"}
+            for _, c in cx.iterrows():
+                choix[c["code_centre"]] = c["intitule"]
+            barre = filtres(filtre(ui.input_select("v_centre", "Centre", choices=choix)))
         return ui.nav_panel(
             "Validation",
             titre_page("shield-check", "Validation",
@@ -409,6 +502,7 @@ def server(input, output, session):
             ui.div(
                 {"class": "carte"},
                 carte_bandeau("shield-check", "Pièces en attente"),
+                barre,
                 ui.output_data_frame("v_table"), ui.br(),
                 # Le motif est place au-dessus des boutons (pas a cote) :
                 # il concerne uniquement le renvoi, mais reste toujours
@@ -734,6 +828,11 @@ def server(input, output, session):
             ui.input_select("r_centre_utilisateur", "Centre",
                              choices=dict(zip(r["centres"]["code_centre"], r["centres"]["intitule"]))),
             ui.input_password("r_code_utilisateur", "Code d'accès"),
+            # La regle des 6 caracteres (voir dl.ajouter_utilisateur) n'etait
+            # annoncee qu'en message d'erreur, apres le clic et une fois tout
+            # le reste tape (18/09/2026).
+            ui.p({"class": "aide", "style": "margin:-6px 0 10px"},
+                 "Six caractères minimum. L'œil permet de relire le code avant de créer."),
             ui.input_action_button("r_ajouter_utilisateur", "Créer", class_="hk-btn-primaire"),
         )
 
@@ -798,7 +897,7 @@ def server(input, output, session):
         r = ref()
         tabs = [onglet_saisie(r), onglet_brouillard(r)]
         if u.get("role") == "validation":
-            tabs += [onglet_validation(), onglet_export(r)]
+            tabs += [onglet_validation(r), onglet_export(r)]
         tabs.append(onglet_controles())
         if peut_voir_assistant():
             tabs.append(onglet_assistant())
@@ -1013,9 +1112,13 @@ def server(input, output, session):
     # Lit les lignes actuellement affichees (une par mois reparti) pour en
     # faire la valeur du champ "repartition" - le rendu generique de
     # m_champs ignore ce type de champ, valeurs() vient les lire ici.
+    # "mois" est une LISTE depuis le 18/09/2026 : un meme reglement peut
+    # couvrir plusieurs mois sur une seule ecriture. Le selectize multiple
+    # renvoie un tuple ; md.mois_tries() cote modeles accepte aussi l'ancienne
+    # forme (une chaine), pour les pieces deja enregistrees.
     def _lire_repartition():
         return [
-            {"mois": get_input(f"m_rep_mois_{rid}", ""),
+            {"mois": list(get_input(f"m_rep_mois_{rid}", []) or []),
              "nature": get_input(f"m_rep_nature_{rid}", "frais"),
              "montant": get_input(f"m_rep_montant_{rid}", 0)}
             for rid in rep_ids()
@@ -1036,7 +1139,8 @@ def server(input, output, session):
             if req(input.m_modele()) != "encaissement":
                 return
             nature = get_input(f"m_rep_nature_{rid}", "frais")
-            ui.update_select(f"m_rep_mois_{rid}", selected=_mois_suggere(nature, _code_tiers_saisi()))
+            propose = _mois_suggere(nature, _code_tiers_saisi())
+            ui.update_selectize(f"m_rep_mois_{rid}", selected=[propose] if propose else [])
 
         if rid != 1:
             @reactive.effect
@@ -1083,13 +1187,24 @@ def server(input, output, session):
             # reste dans le meme bloc isole, sinon choisir un eleve
             # reconstruirait le tableau de repartition en entier pour la
             # meme raison que ci-dessus.
+            # Selection multiple : la valeur est une liste, jamais une chaine.
             if mois_defaut is None:
-                mois_defaut = _mois_suggere(nature_val, _code_tiers_saisi())
+                propose = _mois_suggere(nature_val, _code_tiers_saisi())
+                mois_defaut = [propose] if propose else []
+            else:
+                mois_defaut = list(mois_defaut)
         suppr = ui.tags.td() if premiere else ui.tags.td(
             ui.input_action_link(f"m_rep_suppr_{rid}", "Retirer", class_="lien-etendre"))
         return ui.tags.tr(
-            ui.tags.td(ui.input_select(f"m_rep_mois_{rid}", None, choices=[""] + md.MOIS_FR,
-                                        selected=mois_defaut)),
+            # Selection MULTIPLE (18/09/2026) : un reglement qui couvre
+            # plusieurs mois tient sur une seule ligne, et produit donc une
+            # seule ecriture 411 dont le libelle cite tous les mois - c'est la
+            # facon de faire du comptable. Rien d'autre ne change : une ligne
+            # reste un montant et une nature.
+            ui.tags.td(ui.input_selectize(
+                f"m_rep_mois_{rid}", None, choices=md.MOIS_FR,
+                selected=mois_defaut, multiple=True,
+                options={"placeholder": "Mois..."})),
             ui.tags.td(ui.input_select(f"m_rep_nature_{rid}", None,
                                         choices={"frais": "Frais", "avance": "Avance",
                                                  "solde": "Solde / Retard"},
@@ -1971,7 +2086,14 @@ def server(input, output, session):
         d = donnees()
         d = d[d["statut"].isin(["saisie", "a_corriger"])]
         if not est_comptable():
-            d = d[d["centre"] == u["centre"]]
+            return d[d["centre"] == u["centre"]]
+        # Comptable du siege : filtre d'affichage facultatif (18/09/2026, voir
+        # onglet_validation). get_input tolere l'absence de l'input - la
+        # premiere lecture peut preceder son arrivee cote client, et un
+        # validateur local n'a jamais ce selecteur.
+        choix = get_input("v_centre", "Tous")
+        if choix and choix != "Tous":
+            d = d[d["centre"] == choix]
         return d
 
     @render.data_frame

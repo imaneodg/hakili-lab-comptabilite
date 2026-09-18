@@ -39,6 +39,28 @@ nginx/certs/*.pem
 BROUILLARD_*.xlsx
 Claude outputs/
 
+# Tout classeur Excel, sans exception (18/09/2026). La regle precedente ne
+# visait que "BROUILLARD_*" : Plan_tiers.xlsx et Plan_comptable.xlsx, poses a
+# la racine, contenaient 1455 noms d'eleves, de fournisseurs et de personnel
+# et n'etaient couverts par rien. Un "git add -A" les aurait publies, et un
+# fichier pousse sur un depot public ne se retire pas d'un historique Git par
+# un simple git rm. La liste des noms de fichiers possibles est infinie,
+# celle des classeurs qu'il faudrait versionner est vide : on interdit donc
+# l'extension en bloc plutot que fichier par fichier.
+*.xlsx
+
+# Scripts de chargement engendres depuis ces classeurs : meme contenu, meme
+# regle. sql/seed.sql (referentiel technique, aucun nom de personne) reste
+# suivi, lui.
+sql/seed_tiers.sql
+sql/charger_plan_tiers.sql
+# charger_plan_comptable.sql porte deux noms d'associes repris du plan Sage
+# (462100, 462200). Meme traitement, pour que les deux scripts de chargement
+# suivent le meme chemin vers le serveur (scp) et qu'aucun nom de personne
+# n'atterrisse sur un depot public. Les deux se regenerent depuis les
+# classeurs Sage ; la vraie reponse de fond reste de rendre le depot prive.
+sql/charger_plan_comptable.sql
+
 # Graphiques generes a l'execution par l'assistant IA (jamais du code source)
 www/graphiques/
 
