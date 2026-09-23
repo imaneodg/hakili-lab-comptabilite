@@ -11,10 +11,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
-COPY chat_config.py .
 COPY composants.py .
 COPY logic ./logic
 COPY sql ./sql
+COPY assistant ./assistant
 COPY mcp_server ./mcp_server
 COPY www ./www
 

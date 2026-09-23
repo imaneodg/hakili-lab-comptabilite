@@ -660,7 +660,7 @@ nginx/hakili.conf   — configuration nginx (a adapter : domaine, certificats)
 
 
 
-Le Dockerfile copie désormais bien tout ce dont l'application a besoin pour fonctionner en conteneur, y compris `mcp\_server/` et `chat\_config.py` (l'assistant IA plantait auparavant en conteneur, faute de ces deux éléments — corrigé le 05/09/2026).
+Le Dockerfile copie tout ce dont l'application a besoin pour fonctionner en conteneur, y compris le dossier `assistant/` (assistant IA, reconstruit le 24/09/2026) et `mcp\_server/`.
 
 
 
@@ -851,6 +851,44 @@ L'objectif est de permettre à HAKILI LAB de disposer d'une application centrali
 \* des sauvegardes régulières ;
 
 \* une architecture pouvant être déployée sur un serveur.
+
+
+
+\## Assistant IA (reconstruit le 24/09/2026)
+
+
+
+L'assistant répond en langage naturel sur les données réelles de Hakili\_compta. Il comprend les fautes et les abréviations (« saab », « tampuy », « fevirer », « mars 26 », « depuis la rentrée »), dit comment il a compris la question et demande une précision seulement quand deux lectures sont possibles.
+
+
+
+```text
+
+assistant/comprehension.py  texte libre -> centre, période, tiers, catégorie exacts
+
+assistant/semantique.py     écritures -> encaissements, décaissements, charges (une seule définition)
+
+assistant/moteur.py         analyser, comparer, soldes, lister, contrôles, personnel, SQL en lecture
+
+assistant/outils.py         les 10 outils du modèle (dans l'application, sans sous-processus)
+
+assistant/rendu.py          tableaux et graphiques affichés dans les cartes du chat
+
+assistant/prompt.py         consignes : réponses courtes et claires, chiffres venant des outils
+
+assistant/session.py        une conversation par utilisateur, historique borné, journal
+
+```
+
+
+
+\* Les catégories de charge (`categories\_charge`) et les alias de centres (`centres\_alias`) se complètent en base, sans toucher au code.
+
+\* Chaque question est tracée dans `journal\_assistant` (utilisateur, outils appelés, durée, jetons).
+
+\* Évaluation sur le vrai modèle : `python -m outils.evaluer\_assistant`.
+
+\* Variables : `ANTHROPIC\_API\_KEY` (obligatoire), `HAKILI\_MODELE\_IA`, `HAKILI\_ASSISTANT\_DATABASE\_URL` (rôle en lecture seule, recommandé) — voir `.env.example`.
 
 
 

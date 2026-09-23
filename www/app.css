@@ -775,6 +775,44 @@ shiny-chat-container {
   --shiny-chat-user-message-bg: var(--hk-primaire-clair);
 }
 
+/* Carte de l'assistant : la conversation occupe la hauteur utile de l'ecran. */
+.hk-ia-carte { display:flex; flex-direction:column; }
+.hk-ia-carte shiny-chat-container { min-height:62vh; max-height:calc(100vh - 290px); }
+.hk-ia-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.hk-ia-actions .form-group { margin:0; }
+.hk-ia-actions select { height:38px; font-size:var(--hk-petit); }
+
+/* Cartes de resultat sous les reponses : perimetre, tableau, graphique. */
+.hk-ia-perimetre { color:var(--hk-texte-doux); font-size:var(--hk-etiquette); margin:0 0 8px; }
+.hk-ia-note { color:var(--hk-texte-doux); font-size:var(--hk-etiquette); margin:6px 0 0; }
+.hk-ia-table-wrap { overflow:auto; max-height:420px; border:1px solid var(--hk-bordure);
+  border-radius:var(--hk-rayon-champ); }
+.hk-ia-table { width:100%; border-collapse:collapse; font-size:var(--hk-petit); font-family:var(--hk-police); }
+.hk-ia-table th { font-family:var(--hk-police); position:sticky; top:0; background:var(--hk-tableau-entete); color:var(--hk-texte);
+  font-weight:600; text-align:left; padding:7px 10px; white-space:nowrap; }
+.hk-ia-table td { padding:6px 10px; border-top:1px solid var(--hk-bordure-douce); }
+.hk-ia-table .num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.hk-ia-table tfoot td { font-weight:600; border-top:1px solid var(--hk-bordure-forte);
+  background:var(--hk-ligne-accent); }
+/* Point financier : quatre tuiles, puis centres, depenses, SIAO, a verifier. */
+.hk-ia-tuiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:10px;
+  margin-bottom:14px; font-family:var(--hk-police); }
+.hk-ia-tuile { border:1px solid var(--hk-bordure); border-radius:var(--hk-rayon-champ); padding:10px 12px;
+  background:var(--hk-carte); }
+.hk-ia-tuile-titre { font-size:var(--hk-etiquette); color:var(--hk-texte-doux); }
+.hk-ia-tuile-valeur { font-size:18px; font-weight:600; color:var(--hk-texte); margin-top:2px;
+  font-variant-numeric:tabular-nums; }
+.hk-ia-tuile.negatif .hk-ia-tuile-valeur { color:var(--hk-erreur); }
+.hk-ia-tuile-detail { font-size:var(--hk-etiquette); color:var(--hk-texte-doux); margin-top:2px; }
+.hk-ia-sous-titre { font-size:var(--hk-petit); font-weight:600; color:var(--hk-texte); margin:12px 0 6px;
+  font-family:var(--hk-police); }
+.hk-ia-colonnes { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; }
+.hk-ia-liste { list-style:none; padding:0; margin:0; font-size:var(--hk-petit); font-family:var(--hk-police); }
+.hk-ia-liste li { display:flex; justify-content:space-between; gap:12px; padding:5px 0;
+  border-bottom:1px solid var(--hk-bordure-douce); }
+.hk-ia-graphique { display:block; width:100%; max-width:720px; height:auto; margin:0 auto; }
+.hk-ia-perimetre, .hk-ia-note { font-family:var(--hk-police); }
+
 /* ---------------------------------------------------------------------
    Bouton "afficher le code" sur les champs de code d'acces (connexion et
    creation d'utilisateur). Pose cote client par JS_OEIL_CODE dans app.py.

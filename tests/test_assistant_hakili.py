@@ -27,13 +27,17 @@
 #
 # Aucun de ces tests n'ouvre de connexion Postgres : toutes les fonctions
 # testees acceptent ref/d en parametres explicites.
+#
+# 24/09/2026 : les tests de la chaine graphique MCP et de mcp_server/portee.py
+# ont ete retires avec ces modules (assistant reconstruit, voir
+# tests/test_assistant_ia.py). Les regles comptables testees ici restent
+# celles qu'utilise la nouvelle couche assistant/semantique.py.
 # ---------------------------------------------------------------------------
 
 import pandas as pd
 import pytest
 
 import logic.analyse as an
-import logic.graphiques as gr
 
 CENTRES = ["SAA", "TAM"]
 
@@ -319,100 +323,3 @@ def test_annee_academique_bascule_en_septembre():
     assert an.annee_academique_de("2026-09-01")["libelle"] == "2026-2027"
     assert an.annee_academique_de("2026-09-01")["date_debut"] == "2026-09-01"
     assert an.annee_academique_de("2026-08-31")["date_fin"] == "2026-08-31"
-
-
-# =============================================================================
-# Chaine des graphiques
-# =============================================================================
-
-def test_un_resultat_mcp_arrive_en_chaine_json_et_doit_etre_decode():
-    """Le defaut qui empechait TOUT graphique de s'afficher : servi par MCP, un
-    outil ne renvoie pas un dict a l'application mais une chaine JSON."""
-    valeur = '{"mois": "202603", "recettes": 1691000.0, "depenses": 1406098.0}'
-    assert gr.valeur_outil(valeur) == {"mois": "202603", "recettes": 1691000.0,
-                                       "depenses": 1406098.0}
-
-
-def test_une_liste_mcp_arrive_en_objets_colles_bout_a_bout():
-    """Second piege : un outil qui renvoie une liste produit un fragment de
-    texte PAR ELEMENT, que chatlas recolle avec des sauts de ligne. Le
-    resultat n'est pas un document JSON valide, et comme il est indente, un
-    decoupage ligne par ligne ne marche pas non plus."""
-    flux = ('{\n  "mois": "202603",\n  "recettes": 1.0\n}\n'
-            '{\n  "mois": "202604",\n  "recettes": 2.0\n}')
-    decode = gr.valeur_outil(flux)
-    assert isinstance(decode, list) and len(decode) == 2
-    assert [l["mois"] for l in decode] == ["202603", "202604"]
-
-
-def test_chaque_outil_avec_graphique_trace_depuis_une_chaine_json():
-    """Garde-fou principal : le pipeline complet, avec la valeur telle que
-    l'application la recoit reellement."""
-    import json
-    cas = {
-        "evolution_six_mois": [{"mois": "202603", "recettes": 10.0, "depenses": 5.0},
-                                {"mois": "202604", "recettes": 12.0, "depenses": 6.0}],
-        "evolution_resultat_par_centre": [
-            {"mois": "202603", "centre": "SAA", "resultat_net": 5.0},
-            {"mois": "202603", "centre": "TAM", "resultat_net": 7.0}],
-        "classement_centres_par_recettes": [{"centre": "SAA", "recettes": 10.0}],
-        "classement_centres_par_recettes_trimestre": [{"centre": "SAA", "recettes_trimestre": 30.0}],
-        "classement_rentabilite": [{"centre": "SAA", "marge_pct": 12.0}],
-        "classement_structure_couts": [{"centre": "SAA", "ratio_couts_pct": 88.0}],
-        "contribution_centres": [{"centre": "SAA", "part_pct": 60.0},
-                                  {"centre": "TAM", "part_pct": 40.0}],
-        "repartition_recettes": {"scolarite_encaissee": 8.0, "prestations_facturees": 2.0},
-        "effectif_actif_evolution": [{"mois": "202603", "effectif_proxy": 20},
-                                      {"mois": "202604", "effectif_proxy": 22}],
-        "resultat_periode": {"date_debut": "2026-01-01", "date_fin": "2026-03-31",
-                              "detail_mensuel": [{"mois": "202601", "recettes": 1.0, "depenses": 2.0},
-                                                 {"mois": "202602", "recettes": 3.0, "depenses": 1.0}]},
-        "resultat_annee_academique": {"annee_academique": "2025-2026", "recettes": 10.0,
-                                       "depenses": 8.0, "annee_academique_precedente": "2024-2025",
-                                       "recettes_annee_precedente": 9.0,
-                                       "depenses_annee_precedente": 7.0},
-    }
-    assert set(cas) == set(gr.OUTILS_AVEC_GRAPHIQUE), (
-        "Tout outil declare dans OUTILS_AVEC_GRAPHIQUE doit avoir un cas de test ici.")
-    for nom, valeur in cas.items():
-        if isinstance(valeur, list):
-            flux = "\n".join(json.dumps(x, indent=2) for x in valeur)   # exactement MCP + chatlas
-        else:
-            flux = json.dumps(valeur, indent=2)
-        image = gr.graphique_pour_outil(nom, flux)
-        assert image, f"aucun graphique produit pour {nom}"
-        assert image.startswith("iVBOR"), f"{nom} n'a pas produit un PNG"
-
-
-def test_une_reponse_indisponible_ne_produit_pas_de_graphique():
-    flux = '{"disponible": false, "message": "pas d\'echeancier par eleve"}'
-    assert gr.graphique_pour_outil("repartition_recettes", flux) is None
-
-
-def test_un_outil_sans_graphique_ne_plante_pas():
-    assert gr.graphique_pour_outil("part_masse_salariale", '{"part_pct": 12}') is None
-    assert gr.graphique_pour_outil("evolution_six_mois", "pas du json") is None
-    assert gr.graphique_pour_outil("evolution_six_mois", "") is None
-    assert gr.graphique_pour_outil("evolution_six_mois", None) is None
-
-
-# =============================================================================
-# Cloisonnement par centre
-# =============================================================================
-
-def test_la_portee_par_defaut_ne_restreint_rien(monkeypatch):
-    from mcp_server import portee
-    monkeypatch.delenv(portee.VARIABLE_ENVIRONNEMENT, raising=False)
-    assert portee.resoudre("SAA") == "SAA"
-    assert portee.resoudre(None) is None
-    assert portee.restreindre_centres(CENTRES) == CENTRES
-
-
-def test_une_session_limitee_ne_peut_pas_interroger_un_autre_centre(monkeypatch):
-    from mcp_server import portee
-    monkeypatch.setenv(portee.VARIABLE_ENVIRONNEMENT, "TAM")
-    assert portee.resoudre(None) == "TAM"
-    assert portee.resoudre("TAM") == "TAM"
-    with pytest.raises(portee.PorteeRefusee):
-        portee.resoudre("SAA")
-    assert portee.restreindre_centres(CENTRES) == ["TAM"]

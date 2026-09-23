@@ -303,12 +303,3 @@ def test_les_classements_portent_le_nom_complet(ref, monkeypatch):
     classement = an.classement_centres_recettes(mois, ref)
     assert "centre_nom" in classement.columns
     assert set(classement["centre_nom"]) >= {"Pissy", "SIAO", "Tampouy"}
-
-
-def test_les_graphiques_etiquettent_en_toutes_lettres():
-    import json
-    import logic.graphiques as gr
-    flux = "\n".join(json.dumps(x, indent=2) for x in [
-        {"centre": "SIA", "centre_nom": "SIAO", "recettes": 100.0},
-        {"centre": "PIS", "centre_nom": "Pissy", "recettes": 80.0}])
-    assert gr.graphique_pour_outil("classement_centres_par_recettes", flux)

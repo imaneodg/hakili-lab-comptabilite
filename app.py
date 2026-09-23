@@ -16,11 +16,8 @@ import json
 import logging
 import os
 import re
-import sys
 from datetime import date, datetime
 from pathlib import Path
-import base64
-import uuid
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -56,44 +53,25 @@ from logic import migrations as _migrations
 _migrations.appliquer()
 
 import logic.modeles as md
-import logic.questions_assistant as qa
-import logic.graphiques as gr
-from chat_config import get_chat_client
-from chatlas import ContentToolResult
+# Assistant IA (reconstruit le 24/09/2026) : voir assistant/__init__.py. Les
+# outils tournent dans l'application, sans sous-processus MCP, et les
+# graphiques s'affichent dans les cartes du chat - plus de fichiers PNG
+# ecrits dans www/graphiques.
+from assistant.session import SessionAssistant
 from composants import titre_page, carte_bandeau, hk_info, filtre, filtres, stat
 
-_DOSSIER_GRAPHIQUES = Path(__file__).parent / "www" / "graphiques"
+# Message d'accueil de l'assistant : les six questions du tableau de bord en
+# pastilles cliquables (classe "suggestion" du composant de chat : un clic
+# remplit la zone de saisie, modifiable avant envoi).
+def _message_accueil():
+    from html import escape
+    from assistant.questions import ESSENTIELLES
+    pastilles = "".join(f'<li><span class="suggestion">{escape(q)}</span></li>' for q in ESSENTIELLES)
+    return ("Bonjour. Posez votre question comme elle vous vient, ou choisissez :\n\n"
+            f"<ul>{pastilles}</ul>")
 
 
-def _purger_graphiques_perimes(age_max_heures=24):
-    """Retire les graphiques generes par l'assistant IA depuis plus de
-    age_max_heures. Corrige le 22/09/2026 (m6 de l'audit du 18/09) : ces
-    fichiers etaient ecrits sans jamais etre supprimes (un par reponse
-    graphique), ce qui remplissait le disque au fil du temps et perdait les
-    liens des anciennes reponses du chat a chaque redeploiement (le dossier
-    n'est pas un volume Docker).
-
-    Restent servis sans authentification via static_assets : un data-URI a
-    ete essaye le 12/09/2026 et ne fonctionne pas, le composant chat de Shiny
-    sanitizant le HTML issu du markdown et n'autorisant que les schemas
-    http/https pour un <img src=...>. Le nom de fichier en UUID4 rend l'acces
-    impossible a deviner en pratique ; une vraie route authentifiee
-    demanderait de remplacer static_assets par un point d'entree Shiny
-    dedie - changement plus large, non fait ici."""
-    if not _DOSSIER_GRAPHIQUES.is_dir():
-        return
-    limite = datetime.now().timestamp() - age_max_heures * 3600
-    for f in _DOSSIER_GRAPHIQUES.glob("*.png"):
-        try:
-            if f.stat().st_mtime < limite:
-                f.unlink()
-        except OSError:
-            pass
-
-
-_purger_graphiques_perimes()
-
-AUCUNE_SUGGESTION = "Choisissez une catégorie ci-dessus"
+MESSAGE_ACCUEIL_ASSISTANT = _message_accueil()
 
 STATUTS = {"saisie": "En attente de validation", "validee": "Validée",
            "a_corriger": "À corriger", "exportee": "Exportée vers Sage"}
@@ -331,25 +309,26 @@ def server(input, output, session):
     # consomme et efface a l'enregistrement de la piece corrigee.
     correction = reactive.value(None)
 
-    # ---------------- assistant IA : etat et connexion MCP -------------------
+    # ---------------- assistant IA : etat ---------------------------------------
     #
-    # Un client Chatlas par session (jamais partage entre deux utilisateurs
-    # connectes en meme temps), cree paresseusement au premier besoin plutot
-    # qu'au demarrage de la session : une caissiere qui n'a jamais acces a
-    # cet onglet ne doit jamais ouvrir de sous-processus MCP pour rien.
+    # Une conversation (SessionAssistant) par utilisateur connecte, creee au
+    # premier besoin et recreee si un autre utilisateur se connecte dans le
+    # meme onglet du navigateur : jamais l'historique ni la portee d'un autre.
     chat = ui.Chat(id="chat_assistant")
-    chat_client_val = reactive.value(None)
-    mcp_connecte = reactive.value(False)
+    _assistant = {"session": None, "identifiant": None}
 
-    def chat_client():
-        # La lecture est isolee : sans cela, appeler chat_client() depuis un effet
-        # reactif (_connecter_mcp) cree une dependance sur chat_client_val, que le
-        # .set() juste en dessous invalide aussitot - l'effet repart alors pendant
-        # que son premier await est encore en cours.
+    def assistant():
         with reactive.isolate():
-            if chat_client_val() is None:
-                chat_client_val.set(get_chat_client())
-            return chat_client_val()
+            u = util()
+            siege = est_comptable()
+        ident = (u or {}).get("identifiant")
+        if _assistant["session"] is None or _assistant["identifiant"] != ident:
+            # Portee : None = tous les centres (comptable du siege) ; sinon le
+            # seul centre de l'utilisateur. Liste vide = aucun acces.
+            portee = None if siege else ([u["centre"]] if u and u.get("centre") else [])
+            _assistant["session"] = SessionAssistant(utilisateur=u, portee=portee)
+            _assistant["identifiant"] = ident
+        return _assistant["session"]
 
     def rafraichir():
         maj.set(maj() + 1)
@@ -699,53 +678,43 @@ def server(input, output, session):
             value="controles", icon=ui.tags.i({"class": "bi bi-search"}),
         )
 
-    # Onglet reserve au comptable (voir peut_voir_assistant) : suggestions de
-    # questions regroupees par categorie a gauche, conversation libre a
-    # droite, connectee au serveur MCP maison (mcp_server/server.py) qui
-    # interroge Hakili_compta en direct.
+    # Onglet reserve au comptable (voir peut_voir_assistant). Une seule carte :
+    # la conversation, avec en en-tete les exemples de questions (un choix
+    # REMPLIT la zone de saisie, modifiable avant envoi) et "Nouvelle
+    # conversation". Le detail des chiffres et les graphiques s'affichent dans
+    # des cartes sous chaque reponse, repliees par defaut sauf les graphiques.
     def onglet_assistant():
-        categories = ["Poser ma propre question..."] + list(qa.QUESTIONS_PAR_CATEGORIE.keys())
-        # Avatar de l'assistant : le trait de marque Hakili Lab plutot que
-        # l'icone robot generique livree par defaut avec le composant chat -
-        # coherent avec le reste de l'appli, jamais un signe visuel qui
-        # signale "ceci est un chatbot IA generique".
+        try:
+            groupes = assistant().exemples()
+        except Exception as e:
+            dl.logger.warning("Exemples de l'assistant indisponibles : %s", e)
+            groupes = {}
+        choix = {"": "Questions fréquentes..."}
+        for categorie, questions in groupes.items():
+            choix[categorie] = {q: q for q in questions}
+        # Avatar : le trait de marque Hakili Lab, pas l'icone robot generique.
         avatar = ui.tags.img(src="hakili_mark.png", alt="",
                               style="width:24px;height:24px;border-radius:50%;object-fit:cover")
+        entete = ui.div(
+            {"class": "hk-ia-actions"},
+            ui.input_select("ia_exemple", None, choices=choix, width="320px"),
+            ui.input_action_button("ia_nouvelle", "Nouvelle conversation",
+                                   icon=ui.tags.i({"class": "bi bi-plus-lg"}),
+                                   class_="hk-btn-secondaire"),
+        )
         return ui.nav_panel(
             "Assistant IA",
             titre_page("stars", "Assistant IA",
-                       "Interrogez l'assistant financier sur vos données."),
+                       "La situation financière de Hakili Lab, en posant simplement la question."),
             ui.div(
-                {"style": "display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap"},
-                ui.div(
-                    {"class": "carte", "style": "flex:1 1 280px; max-width:320px"},
-                    carte_bandeau("tags", "Catégories"),
-                    ui.input_select("categorie_suggestion", None, choices=categories),
-                    # Cree une seule fois, avec un choix de depart : ne
-                    # jamais recreer ce selecteur via render.ui plus tard
-                    # (meme id recree = widget JS qui ne se reinitialise pas
-                    # toujours proprement cote client). Ses choix se mettent
-                    # a jour via ui.update_select() dans un reactive.effect,
-                    # jamais en le redeclarant.
-                    ui.input_select("question_suggeree", "Suggestions",
-                                     choices=[AUCUNE_SUGGESTION]),
-                    ui.input_action_button("envoyer_suggestion", "Envoyer cette suggestion",
-                                            icon=ui.tags.i({"class": "bi bi-send"}),
-                                            class_="hk-btn-primaire", style="margin-top:10px; width:100%"),
-                ),
-                ui.div(
-                    {"class": "carte", "style": "flex:2 1 420px"},
-                    carte_bandeau("stars", "Assistant financier"),
-                    ui.chat_ui(
-                        "chat_assistant",
-                        placeholder="Ecrivez votre question...",
-                        icon_assistant=avatar,
-                        messages=[
-                            "Bonjour. Je suis l'assistant financier de Hakili Lab. "
-                            "Posez votre question librement, ou choisissez une catégorie "
-                            "à gauche pour des suggestions."
-                        ],
-                    ),
+                {"class": "carte hk-ia-carte"},
+                carte_bandeau("stars", "Assistant financier", extra=entete),
+                ui.chat_ui(
+                    "chat_assistant",
+                    width="min(980px, 100%)",
+                    placeholder="Posez votre question : combien avons-nous reçu ce mois-ci ?",
+                    icon_assistant=avatar,
+                    messages=[MESSAGE_ACCUEIL_ASSISTANT],
                 ),
             ),
             value="assistant", icon=ui.tags.i({"class": "bi bi-stars"}),
@@ -3047,227 +3016,51 @@ def server(input, output, session):
 
     # ---------------- assistant IA --------------------------------------------
     #
-    # Pas de zone_chat()/chat.ui() ici : en Shiny Core (par opposition a
-    # Shiny Express), la methode .ui() de ui.Chat() n'existe plus depuis la
-    # 1.3 - l'affichage se fait directement via ui.chat_ui(...) place dans
-    # le layout (voir onglet_assistant ci-dessus). L'objet `chat` cree plus
-    # haut ne sert plus qu'a la logique serveur (.on_user_submit,
-    # .append_message, .append_message_stream, .user_input()).
+    # Toute la logique est dans assistant/ (voir assistant/__init__.py). Ici,
+    # seulement le branchement a l'interface : droit d'acces revalide cote
+    # serveur a CHAQUE action (un widget cache reste declenchable depuis le
+    # client), un seul flux a la fois, et les exemples qui remplissent la zone
+    # de saisie.
 
-    # Se connecte au serveur MCP maison (mcp_server/server.py) une seule fois
-    # par session, seulement si l'onglet est accessible a cet utilisateur -
-    # inutile d'ouvrir un sous-processus MCP pour une caissiere qui ne verra
-    # jamais cet onglet.
-    @reactive.effect
-    async def _connecter_mcp():
-        if not peut_voir_assistant():
+    async def _envoyer(question):
+        question = (question or "").strip()
+        if not question:
             return
-        # Lecture ISOLEE de mcp_connecte (corrige le 15/09/2026). Avant, cet
-        # effet DEPENDAIT de mcp_connecte, et la branche d'erreur le remettait
-        # a False "pour rouvrir la porte" - ce qui invalidait sa propre
-        # dependance et le relancait. Il echouait de nouveau, remettait False,
-        # repartait : boucle infinie. Observe le 15/09, quand le paquet
-        # anthropic manquait dans l'image : un bandeau rouge par tour, et
-        # surtout un sous-processus MCP lance a chaque tentative, aucun jamais
-        # arrete. Le serveur accumulait processus et connexions Postgres tant
-        # que l'onglet restait ouvert.
-        #
-        # Isoler la lecture supprime la dependance : le .set() ci-dessous ne
-        # peut plus declencher quoi que ce soit. Le verrou est pose AVANT
-        # l'await, pour qu'une seconde execution pendant la connexion sorte
-        # immediatement.
-        with reactive.isolate():
-            if mcp_connecte():
-                return
-            mcp_connecte.set(True)
-        try:
-            # Portee de la session, transmise au sous-processus MCP (voir
-            # mcp_server/portee.py). Un sous-processus par session Shiny :
-            # l'isolation est donc bien par utilisateur connecte, pas par
-            # serveur. Vide = aucune restriction, ce qui est le cas du
-            # comptable du siege - seul a voir l'onglet aujourd'hui, d'ou un
-            # comportement strictement inchange. Le jour ou l'assistant
-            # s'ouvrira aux directeurs de centre (voir peut_voir_assistant),
-            # le cloisonnement s'appliquera sans autre modification.
-            u = util()
-            environnement = dict(os.environ)
-            environnement["HAKILI_PORTEE_CENTRE"] = (
-                "" if est_comptable() or u is None else str(u.get("centre") or ""))
-            await chat_client().register_mcp_tools_stdio_async(
-                command=sys.executable,
-                args=["-m", "mcp_server.server"],
-                transport_kwargs={"env": environnement},
-            )
-        except Exception as e:
-            # Echec typiquement du au sous-processus mcp_server (module
-            # absent de l'image de deploiement, ANTHROPIC_API_KEY manquante,
-            # DATABASE_URL non lue par ce sous-processus...) : journalise
-            # pour le diagnostic, et signale a l'utilisateur au lieu de
-            # laisser planter silencieusement l'onglet Assistant.
-            # On ne remet PAS mcp_connecte a False : une seule tentative par
-            # session (voir le commentaire de la boucle plus haut). L'onglet
-            # reste utilisable, l'assistant seul est indisponible.
-            dl.logger.error("Echec de connexion au serveur MCP : %s", e)
-            # Le message distingue une dependance absente d'une vraie panne
-            # reseau. Le 15/09, "connexion au serveur d'analyse impossible"
-            # s'affichait alors que le paquet anthropic manquait simplement
-            # dans l'image : impossible de deviner sans lire le journal.
-            if isinstance(e, ImportError) or "install" in str(e).lower():
-                message = ("Assistant IA indisponible : une dépendance manque dans "
-                           "l'installation du serveur. Prévenir l'administrateur "
-                           "(le détail est dans le journal de l'application).")
-            else:
-                message = ("Assistant IA indisponible pour le moment "
-                           "(connexion au serveur d'analyse impossible).")
-            ui.notification_show(message, type="error")
-
-    # Le sous-processus MCP lancé par _connecter_mcp n'était jamais arrêté
-    # (15/09/2026) : chaque connexion du comptable laissait derrière elle un
-    # processus Python vivant, avec son propre pool de connexions Postgres.
-    # Sur une journée, autant de processus et de pools que de connexions
-    # successives - le serveur atteignait max_connections avant de manquer de
-    # mémoire.
-    @session.on_ended
-    async def _fermer_mcp():
-        with reactive.isolate():
-            client = chat_client_val()
-        if client is None:
+        session_ia = assistant()
+        if session_ia.occupe:
+            ui.notification_show("Une réponse est déjà en cours.", type="warning", duration=3)
             return
-        try:
-            await client.cleanup_mcp_tools()
-        except Exception as e:
-            dl.logger.warning("Fermeture du serveur MCP en fin de session : %s", e)
-
-    # ContentToolResult.name est une propriete calculee qui LEVE une
-    # ValueError tant que le resultat n'est pas rattache a sa requete d'outil
-    # (chatlas/_content.py). Un getattr(..., defaut) ne rattrape que les
-    # AttributeError : il faut donc un try/except explicite, sous peine de
-    # faire planter tout le flux de reponse pour un nom d'outil manquant.
-    def _nom_outil(contenu):
-        try:
-            return contenu.name
-        except Exception:
-            return None
-
-    def _markdown_graphique(resultats):
-        """Construit l'image a partir du resultat BRUT (deja calcule par
-        logic.analyse) du premier outil MCP graphable de l'echange, et
-        renvoie le markdown qui la reference - jamais a partir du texte que
-        Claude vient de generer.
-
-        Un seul graphique par reponse au maximum (le premier outil
-        "graphable" trouve) : le but est d'illustrer la reponse, pas de la
-        noyer sous plusieurs images.
-
-        Corrige le 12/09/2026 : un data-URI base64 dans le markdown du chat
-        ne s'affichait jamais, meme quand l'image etait correctement generee
-        - le composant chat de Shiny sanitize le HTML issu du markdown et
-        n'autorise que les schemas http/https pour un <img src=...>, jamais
-        "data:". On ecrit donc le PNG comme un vrai fichier statique sous
-        www/graphiques/ (deja servi via static_assets, voir la fin de ce
-        fichier) et on reference son URL relative, qui passe la
-        sanitization sans probleme."""
-        if not resultats:
-            dl.logger.info("[diag graphique] Aucun resultat d'outil dans ce tour")
-            return None
-        for contenu in resultats:
-            nom_outil = _nom_outil(contenu)
-            if not nom_outil:
-                continue
-            # contenu.value est une CHAINE (JSON) et non un dict des lors que
-            # l'outil vient d'un serveur MCP : le decodage est fait par
-            # logic.graphiques.valeur_outil, appele par graphique_pour_outil.
-            image_b64 = gr.graphique_pour_outil(nom_outil, contenu.value)
-            if not image_b64:
-                dl.logger.info("[diag graphique] Outil %s : pas de graphique associe "
-                               "ou valeur non tracable", nom_outil)
-                continue
-            _DOSSIER_GRAPHIQUES.mkdir(parents=True, exist_ok=True)
-            _purger_graphiques_perimes()
-            nom_fichier = f"{uuid.uuid4().hex}.png"
-            (_DOSSIER_GRAPHIQUES / nom_fichier).write_bytes(base64.b64decode(image_b64))
-            dl.logger.info("[diag graphique] Graphique pour %s : OK (%s)", nom_outil, nom_fichier)
-            return f"\n\n![graphique](graphiques/{nom_fichier})"
-        return None
-
-    def _flux_avec_graphique(source):
-        """Enveloppe le flux de chatlas et y ajoute le graphique, une fois le
-        flux epuise.
-
-        Corrige le 12/09/2026. Le graphique etait construit APRES
-        `await chat.append_message_stream(stream)`, en relisant l'historique
-        via `get_last_turn(role="user")`. Or append_message_stream ne bloque
-        pas : elle lance la consommation du flux dans une reactive.extended_task
-        et rend la main aussitot (voir shinychat/_chat.py, "Run the stream in
-        the background to get non-blocking behavior"). Le graphique etait donc
-        lu AVANT que chatlas ait appele l'outil MCP et empile le tour
-        contenant son resultat - les journaux le montraient noir sur blanc,
-        le diagnostic tombant une seconde avant le premier appel a l'API.
-        Consequence : aucun graphique sur la premiere question, puis celui de
-        la question PRECEDENTE colle sous chaque reponse suivante.
-
-        On ne depend plus du tout de l'historique des tours : avec
-        content="all", chatlas fait deja transiter les ContentToolResult dans
-        le flux lui-meme. On les capture au passage, et on n'emet l'image
-        qu'une fois le flux reellement termine - donc forcement apres l'appel
-        d'outil, sans aucune course possible."""
-        async def _flux():
-            resultats = []
-            async for morceau in source:
-                if isinstance(morceau, ContentToolResult):
-                    if getattr(morceau, "error", None) is None:
-                        resultats.append(morceau)
-                    else:
-                        # l'outil a echoue : rien de fiable a tracer
-                        dl.logger.info("[diag graphique] Outil %s en echec, ignore",
-                                       _nom_outil(morceau) or "?")
-                yield morceau
-            markdown = _markdown_graphique(resultats)
-            if markdown:
-                yield markdown
-        return _flux()
+        await chat.append_message_stream(session_ia.repondre(question))
 
     @chat.on_user_submit
     async def _repondre():
-        # Corrige le 22/09/2026 (m4 de l'audit du 18/09) : cette fonction ne
-        # revalidait jamais cote serveur le droit d'acces a l'assistant - un
-        # widget cache reste positionnable depuis le client, meme raisonnement
-        # que pour v_valider. La portee reelle restait limitee (_connecter_mcp
-        # sort immediatement pour un non-comptable, donc aucun outil MCP
-        # n'etait enregistre), mais la cle API de Hakili Lab et le prompt
-        # systeme restaient accessibles a n'importe quel compte connecte.
         if not peut_voir_assistant():
             return
-        try:
-            # chat.user_input() renvoie un objet avec un champ .text, jamais
-            # une chaine brute directement - chatlas plante sinon en essayant
-            # d'iterer sur l'objet complet.
-            message = chat.user_input()
-            texte = message.text if message is not None else ""
-            stream = await chat_client().stream_async(texte, content="all")
-            await chat.append_message_stream(_flux_avec_graphique(stream))
-        except Exception as e:
-            await chat.append_message(f"Erreur : {e}")
+        message = chat.user_input()
+        await _envoyer(getattr(message, "text", message))
 
     @reactive.effect
-    @reactive.event(input.categorie_suggestion)
-    def _maj_suggestions():
-        categorie = input.categorie_suggestion()
-        nouveaux_choix = qa.QUESTIONS_PAR_CATEGORIE.get(categorie, [AUCUNE_SUGGESTION])
-        ui.update_select("question_suggeree", choices=nouveaux_choix)
-
-    @reactive.effect
-    @reactive.event(input.envoyer_suggestion)
-    async def _envoyer_suggestion():
-        question = input.question_suggeree()
-        if not question or question == AUCUNE_SUGGESTION:
+    @reactive.event(input.ia_exemple)
+    def _choisir_exemple():
+        if not peut_voir_assistant():
             return
-        try:
-            await chat.append_message({"role": "user", "content": question})
-            stream = await chat_client().stream_async(question, content="all")
-            await chat.append_message_stream(_flux_avec_graphique(stream))
-        except Exception as e:
-            await chat.append_message(f"Erreur : {e}")
+        question = input.ia_exemple()
+        if question:
+            chat.update_user_input(value=question, focus=True)
+            ui.update_select("ia_exemple", selected="")
+
+    @reactive.effect
+    @reactive.event(input.ia_nouvelle)
+    async def _nouvelle_conversation():
+        if not peut_voir_assistant():
+            return
+        session_ia = assistant()
+        if session_ia.occupe:
+            ui.notification_show("Attendez la fin de la réponse en cours.", type="warning", duration=3)
+            return
+        session_ia.reinitialiser()
+        await chat.clear_messages()
+        await chat.append_message(MESSAGE_ACCUEIL_ASSISTANT)
 
 
 # "www" contient le logo/favicon ; static_assets exige un chemin absolu,

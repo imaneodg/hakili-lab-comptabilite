@@ -11,9 +11,18 @@ python-dotenv==1.2.3
 mcp==1.29.1
 chatlas[anthropic]==0.23.0
 
-# Graphiques de l'assistant IA (voir logic/graphiques.py) : rendu PNG statique
-# cote serveur uniquement, jamais de composant interactif dans le chat.
+# Graphiques de l'assistant IA (voir assistant/rendu.py) : PNG trace cote
+# serveur et integre a la carte du chat, jamais de fichier sur le disque.
 matplotlib>=3.8,<4
+
+# Assistant IA : comprehension des noms mal ecrits (centres, mois, tiers) -
+# voir assistant/comprehension.py.
+rapidfuzz>=3.0,<4
+
+# Version du composant de chat verifiee avec l'assistant reconstruit (cartes
+# de resultat ToolResultDisplay). Installee aujourd'hui comme dependance de
+# shiny ; figee ici pour qu'une mise a jour ne change pas le rendu.
+shinychat==0.6.1
 
 # Hachage des codes d'acces (voir logic/donnees.py : ajouter_utilisateur,
 # tenter_connexion).
