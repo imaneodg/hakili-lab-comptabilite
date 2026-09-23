@@ -86,12 +86,12 @@ INSERT INTO journaux (journal, intitule, compte_contrepartie, type, prefixe_piec
 
 -- Centres (les 5 antennes + le siege)
 INSERT INTO centres (code_centre, intitule, section_analytique, actif) VALUES
-('PIS', 'Pissy', 'PIS', 'oui'),
-('TAM', 'Tampouy', 'TAM', 'oui'),
-('SAA', 'Saaba', 'SAA', 'oui'),
-('SIA', 'SIAO', 'SIA', 'oui'),
-('NAG', 'Nagrin', 'NAG', 'oui'),
-('SIE', 'Siege', 'SIE', 'oui');
+('PIS', 'Pissy', 'PSSY', 'oui'),
+('TAM', 'Tampouy', 'TAMP', 'oui'),
+('SAA', 'Saaba', 'SAAB', 'oui'),
+('SIA', 'SIAO', 'SIAO', 'oui'),
+('NAG', 'Nagrin', 'NAGR', 'oui'),
+('SIE', 'Siege', 'SIEG', 'oui');
 
 -- Soldes d'ouverture des caisses physiques, par centre : a 0 au demarrage
 -- d'une base neuve, a renseigner ensuite depuis Referentiel avec l'encaisse

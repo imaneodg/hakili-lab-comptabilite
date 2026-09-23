@@ -1381,25 +1381,40 @@ def _retirer_ligne_globale_encaissement(d):
     return d[~a_retirer]
 
 
+def _section_sage(d, ref):
+    """Code de section analytique attendu par Sage, pour chaque ligne.
+
+    Sage rapproche la section sur son CODE, pas sur son intitule, et impose a
+    ce code une longueur fixe declaree dans le dossier. On envoie donc
+    `centres.section_analytique` (PIS, TAM, SAA...), qui est justement la
+    colonne prevue pour ca, et jamais l'intitule affiche a l'ecran - lequel
+    varie (Saaba / SAAB), porte des accents et depasse la longueur permise.
+
+    Corrige le 23/09/2026 : l'export envoyait l'intitule, d'ou des fichiers
+    melangeant "Saaba" et "SAAB" selon l'anciennete de la piece, dont aucune
+    forme ne correspondait aux sections creees dans Sage."""
+    centres = ref.get("centres") if isinstance(ref, dict) else None
+    if centres is not None and "section_analytique" in centres.columns:
+        codes = dict(zip(centres["code_centre"], centres["section_analytique"]))
+        col = d["centre"].map(codes)
+        col = col.where(col.notna() & (col.astype(str).str.strip() != ""), d["centre"])
+    else:
+        col = d["centre"]
+    return col.astype(str).str.strip().str.upper()
+
+
 def format_sage(d, ref):
     if d is None or len(d) == 0:
         return None
     d = d.sort_values(["date_piece", "num_definitif", "id_ligne"])
-    d = _retirer_ligne_globale_encaissement(d)
+    # La ligne de caisse globale des encaissements multi-operations n'est
+    # PLUS retiree (23/09/2026). La retirer laissait la piece desequilibree
+    # dans le fichier - credits 411 sans contrepartie au debit - et Sage
+    # refuse d'importer une piece qui ne s'equilibre pas. Le doublon de
+    # libelle qu'on voulait eviter est un desagrement d'affichage ; une piece
+    # rejetee, ou pire, integree a moitie, est une erreur comptable.
     if len(d) == 0:
         return None
-    centres = ref.get("centres") if isinstance(ref, dict) else None
-    # Nom complet du centre (Saaba, Tampouy...) plutot que sa section
-    # analytique abregee : demande explicite pour que Section corresponde a
-    # ce qui s'affiche partout ailleurs dans l'application. A verifier cote
-    # Sage : si le logiciel attend un code court pour ses sections
-    # analytiques, ce champ pourrait devoir rester abrege - a tester avec un
-    # petit fichier avant un envoi en masse.
-    if centres is not None and "intitule" in centres.columns:
-        noms = dict(zip(centres["code_centre"], centres["intitule"]))
-        col_section = d["centre"].map(noms).fillna(d["centre"])
-    else:
-        col_section = d["centre"]
     return pd.DataFrame({
         "Journal": d["journal"],
         "Date": pd.to_datetime(d["date_piece"]).dt.strftime("%d%m%Y"),
@@ -1409,7 +1424,7 @@ def format_sage(d, ref):
         "Libelle": d["libelle"],
         "Debit": d["debit"].apply(lambda x: f"{x:.2f}".replace(".", ",")),
         "Credit": d["credit"].apply(lambda x: f"{x:.2f}".replace(".", ",")),
-        "Section": col_section,
+        "Section": _section_sage(d, ref),
     })
 
 
