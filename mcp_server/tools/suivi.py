@@ -15,6 +15,7 @@ def resultat_net(mois: str) -> dict:
     """Resultat net (recettes moins depenses), tous centres confondus, sur
     le mois donne, avec comparaison au mois precedent. Les transferts entre
     caisses sont exclus des deux cotes : ils ne creent ni recette ni depense."""
+    portee.verifier_non_restreinte("resultat_net")
     ref = dl.lire_referentiel()
     actuel = an.resultat_net_mois(mois, ref)
     precedent = an.resultat_net_mois(an.mois_precedent(mois), ref)
@@ -27,6 +28,7 @@ def evolution_six_mois(mois_fin: str) -> list:
     """Recettes et depenses consolidees, mois par mois, sur les 6 derniers
     mois se terminant au mois indique (AAAAMM) inclus. Adapte a un
     affichage sous forme de graphique en support de la reponse."""
+    portee.verifier_non_restreinte("evolution_six_mois")
     return an.evolution_6mois(mois_fin).to_dict("records")
 
 
@@ -99,6 +101,7 @@ def resultat_annee_vs_precedente(mois_fin: str) -> dict:
     Attention : annee CIVILE (janvier a decembre). Quand la question porte sur
     "l'annee" au sens scolaire, utiliser resultat_annee_academique, qui
     compare deux rentrees comparables."""
+    portee.verifier_non_restreinte("resultat_annee_vs_precedente")
     return an.resultat_annee_vs_precedente(mois_fin)
 
 

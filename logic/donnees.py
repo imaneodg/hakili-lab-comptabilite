@@ -35,8 +35,14 @@ from datetime import datetime
 import bcrypt
 import pandas as pd
 import psycopg2
+import psycopg2.extensions
 import psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
+
+# Import necessaire a la garde d'equilibre d'enregistrer_operation() (M2 de
+# l'audit du 18/09, corrige le 22/09/2026) : aucune boucle, logic/modeles.py
+# n'importe jamais logic/donnees.py.
+import logic.modeles as md
 
 # pandas.read_sql sur une connexion psycopg2 brute (plutot qu'un moteur
 # SQLAlchemy) fonctionne parfaitement mais le signale a chaque appel : on le
@@ -54,20 +60,63 @@ logger = logging.getLogger("hakili.donnees")
 
 _DSN = os.environ.get("DATABASE_URL") or None
 _POOL = ThreadedConnectionPool(minconn=1, maxconn=20, dsn=_DSN)
+
+
+# Une connexion peut mourir sans que personne ne la ferme : redemarrage du
+# conteneur "db", coupure du reseau interne de Docker, connexion restee
+# ouverte trop longtemps et fermee par Postgres. psycopg2 ne le decouvre qu'a
+# la requete suivante.
+def _est_cassee(conn):
+    if conn.closed:
+        return True
+    try:
+        return conn.info.transaction_status == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN
+    except Exception:
+        return True
+
+
 @contextlib.contextmanager
 def _connexion():
     """Preteun une connexion du pool, la rend a la sortie. Valide (commit) si
     le bloc se termine sans exception, annule (rollback) sinon - une piece
     ne peut jamais rester enregistree a moitie."""
     conn = _POOL.getconn()
+    cassee = False
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        # Corrige le 18/09/2026 : conn.rollback() etait appele sans filet. Sur
+        # une connexion deja coupee il leve a son tour, et son exception
+        # remplacait la vraie cause de l'erreur - l'appelant recevait
+        # "connection already closed" au lieu du probleme d'origine.
+        cassee = _est_cassee(conn)
+        if not cassee:
+            try:
+                conn.rollback()
+            except Exception:
+                cassee = True
         raise
     finally:
-        _POOL.putconn(conn)
+        # Une connexion morte rendue telle quelle au pool ressort au prochain
+        # emprunt et echoue encore : une seule coupure empoisonne le pool pour
+        # toute la duree de vie du processus. La fermer ici la fait remplacer
+        # par une connexion neuve au prochain getconn().
+        _POOL.putconn(conn, close=cassee)
+
+
+def est_actif(identifiant):
+    """Vrai si le compte existe et est actif. Sert a revalider une session
+    Shiny deja ouverte (voir app.py, corrige le 22/09/2026, m2 de l'audit du
+    18/09) : avant, seule la connexion verifiait 'actif' ; un compte
+    desactive en cours de session restait pleinement utilisable jusqu'a ce
+    que la personne ferme son navigateur."""
+    if not identifiant:
+        return False
+    with _connexion() as c, c.cursor() as cur:
+        cur.execute("SELECT actif FROM utilisateurs WHERE lower(identifiant) = lower(%s)", (identifiant,))
+        r = cur.fetchone()
+    return bool(r) and str(r[0]).lower() == "oui"
 
 
 def _lire_df(sql, params=None, conn=None):
@@ -210,12 +259,28 @@ TYPES_COLLECTIF = {"411000": "client", "401000": "fournisseur", "422000": "perso
 NATURES_COMPTE = ["charge", "produit", "tresorerie", "bilan", "tiers"]
 
 
-def ajouter_compte(compte, intitule, nature, tiers_obligatoire="non", depense_courante="non"):
+# Creation ouverte a tous les roles depuis le 23/09/2026 (decision d'Afiya :
+# une caissiere doit pouvoir creer le compte ou le tiers qui lui manque sans
+# attendre le comptable). Puisque la saisie n'est plus reservee a quelqu'un
+# qui connait le plan SYSCOHADA, le format est verifie ici, cote base, et non
+# plus seulement laisse au jugement de l'utilisateur. L'auteur est trace dans
+# le journal de l'application (hakili.log).
+def ajouter_compte(compte, intitule, nature, tiers_obligatoire="non", depense_courante="non", par=None):
     compte = str(compte).strip()
     if not compte:
         raise ValueError("Le numero de compte est obligatoire.")
+    # Tout le plan comptable Hakili est sur 6 chiffres (1040 comptes, aucune
+    # exception) : un numero a 5 ou 7 chiffres serait un compte que Sage ne
+    # reconnaitrait pas a l'import. Classe 1 a 9 (SYSCOHADA).
+    if not re.fullmatch(r"[1-9][0-9]{5}", compte):
+        raise ValueError("Le numero de compte doit comporter exactement 6 chiffres "
+                         "et commencer par la classe (1 a 9), ex. 605100.")
     if not intitule or not str(intitule).strip():
         raise ValueError("L'intitule est obligatoire.")
+    if nature not in NATURES_COMPTE:
+        raise ValueError("Nature de compte inconnue.")
+    if tiers_obligatoire not in ("oui", "non") or depense_courante not in ("oui", "non"):
+        raise ValueError("Parametre de compte invalide.")
     with _connexion() as c, c.cursor() as cur:
         cur.execute("SELECT 1 FROM comptes WHERE compte = %s", (compte,))
         if cur.fetchone():
@@ -224,6 +289,7 @@ def ajouter_compte(compte, intitule, nature, tiers_obligatoire="non", depense_co
             "INSERT INTO comptes (compte, intitule, nature, tiers_obligatoire, nb_2024_2025, depense_courante) "
             "VALUES (%s, %s, %s, %s, 0, %s)",
             (compte, str(intitule).strip(), nature, tiers_obligatoire, depense_courante))
+    logger.info("Compte %s (%s) cree par %s.", compte, str(intitule).strip(), par or "?")
 
 
 def ajouter_utilisateur(identifiant, nom, role, centre, code_acces):
@@ -369,16 +435,45 @@ def tenter_connexion(identifiant, centre, code):
                         "centre": centre_u, "actif": "oui"}, 0)
 
 
-def ajouter_tiers(code, intitule, collectif):
+def ajouter_tiers(code, intitule, collectif, par=None):
+    """Cree un tiers, actif immediatement (pas de validation par le
+    comptable, decision du 23/09/2026). Renvoie le code reellement cree.
+
+    Convention du plan tiers Hakili, respectee par les 1450 tiers existants :
+    le code commence par les 3 chiffres de son collectif (411KABORE,
+    401SONABEL...). Si l'utilisateur tape seulement le nom (KABORE), le
+    prefixe est ajoute pour lui ; s'il tape un autre prefixe que celui du
+    collectif choisi (401... pour un eleve), c'est une erreur a signaler, pas
+    a corriger en silence."""
+    code = re.sub(r"\s+", "", str(code or "")).upper()
+    intitule = str(intitule or "").strip().upper()
+    if collectif not in TYPES_COLLECTIF:
+        raise ValueError("Compte collectif inconnu.")
+    if not code:
+        raise ValueError("Le code tiers est obligatoire.")
+    if not intitule:
+        raise ValueError("L'intitule est obligatoire.")
+    pref = str(collectif)[:3]
+    if not code[:1].isdigit():
+        code = pref + code
+    elif not code.startswith(pref):
+        raise ValueError(f"Un tiers rattache au collectif {collectif} doit avoir un code "
+                         f"commencant par {pref} (ex. {pref}{_slug(intitule)}).")
+    if len(code) <= 3:
+        raise ValueError("Le code tiers doit contenir un nom apres le prefixe.")
+    if not re.fullmatch(r"[0-9A-Z_-]+", code):
+        raise ValueError("Le code tiers ne doit contenir que des lettres sans accent et des chiffres.")
     with _connexion() as c, c.cursor() as cur:
-        cur.execute("SELECT 1 FROM tiers WHERE upper(code_tiers) = upper(%s)", (str(code),))
+        cur.execute("SELECT 1 FROM tiers WHERE upper(code_tiers) = upper(%s)", (code,))
         if cur.fetchone():
             raise ValueError("Ce code tiers existe deja.")
-        type_ = TYPES_COLLECTIF.get(collectif, "client")
+        type_ = TYPES_COLLECTIF[collectif]
         cur.execute(
             "INSERT INTO tiers (code_tiers, intitule, compte_collectif, type, actif, actif_annee) "
             "VALUES (%s, %s, %s, %s, 'oui', 'oui')",
             (code, intitule, collectif, type_))
+    logger.info("Tiers %s (%s) cree par %s.", code, intitule, par or "?")
+    return code
 
 
 # --- creation / reactivation a la volee (saisie libre d'un nom) ---------------
@@ -419,39 +514,67 @@ def code_tiers_candidat(valeur, pref, ref):
 
 def resoudre_tiers(valeur, pref, collectif):
     """Version autoritaire, appelee au moment de l'enregistrement reel d'une
-    piece. Cree ou reactive le tiers si necessaire, dans la meme transaction
-    que la lecture qui la precede : deux caisses ne peuvent pas creer le
-    meme nouveau tiers en double, la cle primaire code_tiers l'empeche."""
+    piece. Cree ou reactive le tiers si necessaire.
+
+    Corrige le 22/09/2026 (m5 de l'audit du 18/09) : le FOR UPDATE portait
+    avant sur TOUTES les lignes du prefixe (tous les eleves pour '411', par
+    exemple) le temps de la resolution, ce qui serialisait chaque
+    encaissement de chaque centre entre eux. Remplace par une lecture SANS
+    verrou suivie d'un INSERT ... ON CONFLICT DO NOTHING : la cle primaire
+    code_tiers reste l'unique garde-fou contre un doublon, exactement comme
+    Postgres l'impose deja pour toute autre insertion concurrente. Si deux
+    caisses creent EXACTEMENT le meme nouveau tiers au meme instant, l'une
+    des deux insertions est rejetee par la cle primaire et la fonction relit
+    une fois de plus pour reprendre le code qui vient d'etre cree - un cas
+    rarissime, traite sans jamais bloquer la lecture des autres centres.
+
+    Reste sur sa propre connexion, separee de celle d'enregistrer_operation()
+    qui suit immediatement en pratique : un enregistrement qui echouerait
+    ensuite peut donc laisser un tiers neuf orphelin en base (deuxieme moitie
+    du point m5, non traitee ici - fusionner les deux transactions
+    demanderait de faire remonter la resolution des tiers a l'interieur de
+    enregistrer_operation() elle-meme, donc de deplacer une partie de ce que
+    logic/modeles.py fait aujourd'hui ; changement plus large, a faire a part
+    avec un environnement de test complet)."""
     valeur = str(valeur or "").strip()
     if not valeur:
         return ""
     with _connexion() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT code_tiers, intitule, actif_annee FROM tiers "
-            "WHERE code_tiers ILIKE %s || '%%' FOR UPDATE",
-            (pref,))
-        lignes = cur.fetchall()
-        for code, nom, actif_annee in lignes:
-            if code.upper() == valeur.upper() or (nom or "").upper() == valeur.upper():
-                if str(actif_annee or "").lower() != "oui":
-                    cur.execute(
-                        "UPDATE tiers SET actif_annee = 'oui', updated_at = now() WHERE code_tiers = %s",
-                        (code,))
-                return code
+        for _tentative in range(5):
+            cur.execute(
+                "SELECT code_tiers, intitule, actif_annee FROM tiers "
+                "WHERE code_tiers ILIKE %s || '%%'",
+                (pref,))
+            lignes = cur.fetchall()
+            for code, nom, actif_annee in lignes:
+                if code.upper() == valeur.upper() or (nom or "").upper() == valeur.upper():
+                    if str(actif_annee or "").lower() != "oui":
+                        cur.execute(
+                            "UPDATE tiers SET actif_annee = 'oui', updated_at = now() "
+                            "WHERE code_tiers = %s", (code,))
+                    return code
 
-        existants = {code.upper() for code, _, _ in lignes}
-        base = pref + _slug(valeur)
-        code = base
-        n = 2
-        while code.upper() in existants:
-            code = f"{base}{n}"
-            n += 1
-        type_ = TYPES_COLLECTIF.get(collectif, "client")
-        cur.execute(
-            "INSERT INTO tiers (code_tiers, intitule, compte_collectif, type, actif, actif_annee) "
-            "VALUES (%s, %s, %s, %s, 'oui', 'oui')",
-            (code, valeur.upper(), collectif, type_))
-        return code
+            existants = {code.upper() for code, _, _ in lignes}
+            base = pref + _slug(valeur)
+            code = base
+            n = 2
+            while code.upper() in existants:
+                code = f"{base}{n}"
+                n += 1
+            type_ = TYPES_COLLECTIF.get(collectif, "client")
+            cur.execute(
+                "INSERT INTO tiers (code_tiers, intitule, compte_collectif, type, actif, actif_annee) "
+                "VALUES (%s, %s, %s, %s, 'oui', 'oui') ON CONFLICT (code_tiers) DO NOTHING",
+                (code, valeur.upper(), collectif, type_))
+            if cur.rowcount == 1:
+                return code
+            # Conflit : une autre session a cree ce code entre notre lecture
+            # et notre ecriture. On boucle : la ligne concurrente sera alors
+            # visible et traitee soit comme le meme tiers (meme nom), soit un
+            # code suivant sera calcule.
+        raise RuntimeError(
+            f"Impossible de resoudre le tiers '{valeur}' apres plusieurs tentatives "
+            "(forte concurrence sur ce prefixe) : reessayer.")
 
 
 # Dernieres lignes du compte 411000 d'un tiers, les plus recentes d'abord.
@@ -591,14 +714,14 @@ def _sortie_a_apparier(cur, centre_donateur, centre_destinataire):
         "  AND NOT EXISTS (SELECT 1 FROM ecritures e "
         "                  WHERE e.reference_transfert = s.reference_transfert "
         "                    AND e.compte = %s AND e.credit > 0) "
-        "ORDER BY s.date_piece, s.id_piece LIMIT 1",
+        "ORDER BY s.date_piece, s.id_piece LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
         (MODELE_TRANSFERT_INTERNE, COMPTE_VIREMENTS_FONDS,
          centre_donateur, centre_destinataire, COMPTE_VIREMENTS_FONDS))
     r = cur.fetchone()
     return r[0] if r else ""
 
 
-def _metadonnees_transfert(cur, centre, modele, valeurs, date_piece):
+def _metadonnees_transfert(cur, centre, modele, valeurs, date_piece, ancienne=None):
     """(reference, centre_contrepartie) d'une piece de transfert interne.
 
     Le SENS n'est pas un champ du formulaire : il se deduit de qui saisit. Si
@@ -619,11 +742,22 @@ def _metadonnees_transfert(cur, centre, modele, valeurs, date_piece):
             "Transfert interne : votre centre doit etre le donateur ou le destinataire. "
             "Un centre n'enregistre jamais un transfert entre deux autres centres.")
     if centre == donateur:
+        # Correction d'une sortie (remplacer_piece) : on garde sa reference
+        # si le destinataire n'a pas change - l'entree deja rapprochee en face
+        # reste rapprochee, au lieu de pointer vers une reference disparue.
+        if ancienne and ancienne[0] and ancienne[1] == destinataire:
+            return ancienne[0], destinataire
         return _nouvelle_reference_transfert(cur, date_piece), destinataire
     return _sortie_a_apparier(cur, donateur, destinataire), donateur
 
 
-def enregistrer_operation(pieces, centre, date_piece, modele, utilisateur, note="", valeurs=None):
+def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs,
+                       ancienne_ref=None):
+    """Insere les lignes d'une operation dans la transaction du curseur recu,
+    sans ouvrir ni fermer de connexion elle-meme. Factorisee le 22/09/2026
+    (M3 de l'audit du 18/09) pour etre partagee par enregistrer_operation()
+    (ecriture neuve, sa propre transaction) et remplacer_piece() (correction :
+    ecriture neuve ET suppression de l'ancienne, dans LA MEME transaction)."""
     mois = mois_de(date_piece)
     horo = datetime.now().strftime("%Y%m%d%H%M%S")
     lien = f"L{horo}-{random.randint(100, 999)}" if len(pieces) > 1 else ""
@@ -634,41 +768,141 @@ def enregistrer_operation(pieces, centre, date_piece, modele, utilisateur, note=
         except (TypeError, ValueError):
             v_json = None
     nums = []
+    reference, contrepartie = _metadonnees_transfert(cur, centre, modele, valeurs, date_piece,
+                                                     ancienne=ancienne_ref)
+    for i_p, p in enumerate(pieces):
+        n = _prochain_numero(cur, f"prov:{centre}:{mois}")
+        num = f"{centre}-{mois[2:6]}-{n:03d}"
+        idp = f"{centre}-{horo}-{n}"
+        L = p["lignes"].reset_index(drop=True)
+        for i, row in L.iterrows():
+            cur.execute(
+                "INSERT INTO ecritures (id_ligne, id_piece, id_lien, num_provisoire, num_definitif, "
+                "journal, centre, date_piece, compte, code_tiers, libelle, debit, credit, modele, "
+                "saisi_par, saisi_le, statut, observation, valeurs_json, "
+                "reference_transfert, centre_contrepartie) VALUES "
+                "(%s,%s,%s,%s,'',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),'saisie',%s,%s,%s,%s)",
+                (f"{idp}-{i + 1}", idp, lien, num, p["journal"], centre, str(date_piece),
+                 row["compte"], row["code_tiers"], row["libelle"], float(row["debit"]), float(row["credit"]),
+                 modele, utilisateur, str(note or "").strip(), v_json,
+                 reference, contrepartie))
+        nums.append(num)
+    return nums
+
+
+def enregistrer_operation(pieces, centre, date_piece, modele, utilisateur, note="", valeurs=None):
+    # Corrige le 22/09/2026 (M2 de l'audit du 18/09) : l'equilibre debit/
+    # credit n'etait verifie que cote app.py, avant l'appel. Un appel direct
+    # a cette fonction (import_historique.py, un futur script) ne passait par
+    # aucun controle. La contrainte en base (sql/schema.sql, migration
+    # 2026-09-22) reste le vrai filet ; celui-ci n'existe que pour renvoyer un
+    # message lisible au lieu d'une violation de contrainte brute.
+    if not md.operation_equilibree(pieces):
+        raise ValueError(
+            "Operation desequilibree ou incomplete : aucune ecriture n'a ete enregistree.")
     with _connexion() as c, c.cursor() as cur:
-        reference, contrepartie = _metadonnees_transfert(cur, centre, modele, valeurs, date_piece)
-        for i_p, p in enumerate(pieces):
-            n = _prochain_numero(cur, f"prov:{centre}:{mois}")
-            num = f"{centre}-{mois[2:6]}-{n:03d}"
-            idp = f"{centre}-{horo}-{n}"
-            L = p["lignes"].reset_index(drop=True)
-            for i, row in L.iterrows():
-                cur.execute(
-                    "INSERT INTO ecritures (id_ligne, id_piece, id_lien, num_provisoire, num_definitif, "
-                    "journal, centre, date_piece, compte, code_tiers, libelle, debit, credit, modele, "
-                    "saisi_par, saisi_le, statut, observation, valeurs_json, "
-                    "reference_transfert, centre_contrepartie) VALUES "
-                    "(%s,%s,%s,%s,'',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),'saisie',%s,%s,%s,%s)",
-                    (f"{idp}-{i + 1}", idp, lien, num, p["journal"], centre, str(date_piece),
-                     row["compte"], row["code_tiers"], row["libelle"], float(row["debit"]), float(row["credit"]),
-                     modele, utilisateur, str(note or "").strip(), v_json,
-                     reference, contrepartie))
-            nums.append(num)
+        nums = _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs)
     logger.info("Piece(s) enregistree(s) par %s (centre %s, modele %s) : %s",
                 utilisateur, centre, modele, ", ".join(nums))
     return nums
 
 
+def remplacer_piece(ancien_id, pieces, centre, date_piece, modele, utilisateur, note="", valeurs=None):
+    """Corrige une piece non validee ('saisie' ou 'a_corriger') : enregistre la nouvelle ET retire
+    l'ancienne dans UNE SEULE transaction (corrige le 22/09/2026, M3 de
+    l'audit du 18/09). Avant, app.py appelait enregistrer_operation() puis
+    supprimer_piece() separement : si la seconde echouait (piece deja
+    validee entre-temps par le comptable, connexion coupee), la nouvelle
+    piece restait en base A COTE de l'ancienne, sans qu'aucun ecran ne
+    permette de le rattraper.
+
+    Revalide que l'ancienne piece est toujours non validee juste avant de la
+    retirer : si elle a change de statut ou disparu entre-temps, toute la
+    transaction est annulee (rien n'est enregistre) plutot que de creer la
+    piece neuve a moitie.
+
+    23/09/2026 : ouverte aussi aux pieces 'saisie' (bouton "Corriger la
+    piece" du Brouillard et de la Validation). Deux consequences :
+      - les lignes sont verrouillees (FOR UPDATE) le temps de la
+        transaction : un validateur qui valide la meme piece au meme instant
+        attend la fin de la correction, puis ne trouve plus rien a valider -
+        jamais une piece validee effacee par une correction concurrente ;
+      - la piece corrigee reste dans le centre de la piece d'origine, meme
+        quand c'est le comptable du siege qui corrige : le parametre
+        `centre` n'est plus qu'une valeur de repli."""
+    if not md.operation_equilibree(pieces):
+        raise ValueError(
+            "Operation desequilibree ou incomplete : aucune ecriture n'a ete enregistree.")
+    with _connexion() as c, c.cursor() as cur:
+        ids = _ids_lies(cur, [ancien_id])
+        cur.execute("SELECT id_piece, statut, centre, modele, reference_transfert, centre_contrepartie "
+                    "FROM ecritures WHERE id_piece = ANY(%s) FOR UPDATE", (ids,))
+        verrou = cur.fetchall()
+        statuts = {r[1] for r in verrou}
+        if not statuts:
+            raise ValueError("Piece a corriger introuvable : elle a peut-etre deja ete traitee.")
+        if statuts - {"saisie", "a_corriger"}:
+            raise ValueError(
+                "La piece a corriger a ete validee, supprimee ou exportee entre-temps : "
+                "la correction est annulee, rien n'a ete enregistre. "
+                "Rafraichir l'ecran et reessayer.")
+        origine = next((r for r in verrou if r[0] == ancien_id), verrou[0])
+        centre = origine[2] or centre
+        ancienne_ref = None
+        if origine[3] == MODELE_TRANSFERT_INTERNE and origine[2] and origine[4]:
+            # Seule une SORTIE garde sa reference (voir _metadonnees_transfert) :
+            # meme ligne distinctive que _sortie_a_apparier (585000 au debit).
+            cur.execute("SELECT 1 FROM ecritures WHERE id_piece = %s AND compte = %s AND debit > 0",
+                        (origine[0], COMPTE_VIREMENTS_FONDS))
+            if cur.fetchone():
+                ancienne_ref = (origine[4], origine[5])
+        # L'ancienne piece est archivee puis retiree AVANT d'inserer la
+        # nouvelle (toujours dans la meme transaction, donc sans risque de
+        # perte) : pour un transfert interne, la sortie qu'elle rapprochait
+        # redevient ainsi disponible pour la piece corrigee.
+        cur.execute(
+            "SELECT id_piece, row_to_json(ecritures) FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
+        lignes = cur.fetchall()
+        cur.executemany(
+            "INSERT INTO suppressions_ecritures (id_piece, contenu, supprime_par) VALUES (%s, %s, %s)",
+            [(idp, psycopg2.extras.Json(contenu), utilisateur) for idp, contenu in lignes])
+        cur.execute("DELETE FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
+        nums = _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs,
+                                  ancienne_ref=ancienne_ref)
+    logger.info("Piece(s) %s : correction de %s par %s (ancienne piece retiree dans la meme transaction).",
+                ", ".join(nums), ancien_id, utilisateur)
+    return nums
+
+
+def _ids_lies(cur, ids):
+    """Version interne d'avec_liees(), reutilisant un curseur/une transaction
+    deja ouverts par l'appelant. Corrige le 22/09/2026 (m1 de l'audit du
+    18/09) : supprimer_piece, valider_pieces, rejeter_pieces et
+    marquer_exporte appelaient toutes avec_liees() depuis l'INTERIEUR de leur
+    propre transaction, ce qui empruntait deux connexions du pool au lieu
+    d'une (maxconn=20 pouvait s'epuiser sous charge) et lisait sur une
+    transaction separee, donc invisible aux ecritures non encore validees de
+    la transaction appelante."""
+    ids = list(ids)
+    if not ids:
+        return ids
+    cur.execute(
+        "SELECT DISTINCT id_piece FROM ecritures WHERE id_lien IN "
+        "(SELECT DISTINCT id_lien FROM ecritures WHERE id_piece = ANY(%s) AND id_lien <> '')",
+        (list(ids),))
+    extra = [r[0] for r in cur.fetchall()]
+    return list(dict.fromkeys(list(ids) + extra))
+
+
 def avec_liees(ids, d=None):
+    """Version publique : ouvre sa propre connexion. A n'utiliser que hors
+    d'une transaction deja en cours ; depuis l'interieur d'une fonction de ce
+    module, preferer _ids_lies(cur, ids)."""
     ids = list(ids)
     if not ids:
         return ids
     with _connexion() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT id_piece FROM ecritures WHERE id_lien IN "
-            "(SELECT DISTINCT id_lien FROM ecritures WHERE id_piece = ANY(%s) AND id_lien <> '')",
-            (list(ids),))
-        extra = [r[0] for r in cur.fetchall()]
-    return list(dict.fromkeys(list(ids) + extra))
+        return _ids_lies(cur, ids)
 
 
 def supprimer_piece(id_piece, utilisateur="?"):
@@ -680,7 +914,7 @@ def supprimer_piece(id_piece, utilisateur="?"):
     if not isinstance(id_piece, (list, tuple, pd.Index)):
         id_piece = [id_piece]
     with _connexion() as c, c.cursor() as cur:
-        ids = avec_liees(list(id_piece))
+        ids = _ids_lies(cur, list(id_piece))
         cur.execute("SELECT DISTINCT statut FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
         statuts = {r[0] for r in cur.fetchall()}
         if not statuts:
@@ -699,7 +933,7 @@ def supprimer_piece(id_piece, utilisateur="?"):
         return len(ids)
 
 
-def valider_pieces(ids, utilisateur):
+def valider_pieces(ids, utilisateur, autoriser_attente=False):
     """Valide et numerote les pieces au statut 'saisie' parmi `ids`.
 
     Seule une piece 'saisie' peut etre validee : une piece renvoyee pour
@@ -714,27 +948,60 @@ def valider_pieces(ids, utilisateur):
     disparaissaient du resultat sans un mot - le validateur croyait son lot
     termine et n'avait aucune raison de relancer les caissieres concernees.
 
+    23/09/2026 : une piece qui mouvemente encore le compte d'attente
+    (471000) n'est plus validee - elle doit d'abord etre reclassee sur le bon
+    compte (onglet Controles). Elle est ecartee sous la cle "compte_attente",
+    avec sa jumelle si elle fait partie d'une operation liee (on ne valide
+    jamais une paire a moitie). app.py bloque deja ce cas avant l'appel (via
+    controler()) ; ce second filet protege tout autre appelant.
+    autoriser_attente=True est reserve a import_historique.py, qui reprend
+    des brouillards deja passes en comptabilite.
+
     Renvoie un dict :
         {"validees": [id_piece...], "ignorees": {statut: [id_piece...]}}
     """
     with _connexion() as c, c.cursor() as cur:
-        ids = avec_liees(ids)
+        ids = _ids_lies(cur, ids)
         # On lit TOUTES les pieces demandees, pas seulement les validables :
         # c'est ce qui permet de dire pourquoi les autres sont ecartees.
         cur.execute(
-            "SELECT id_piece, journal, date_piece, statut FROM ecritures "
-            "WHERE id_piece = ANY(%s) GROUP BY id_piece, journal, date_piece, statut",
+            "SELECT id_piece, journal, date_piece, statut, min(saisi_le) AS premiere_saisie "
+            "FROM ecritures WHERE id_piece = ANY(%s) "
+            "GROUP BY id_piece, journal, date_piece, statut "
+            "ORDER BY premiere_saisie",
             (ids,))
         toutes = cur.fetchall()
         if not toutes:
             raise ValueError("Aucune piece a valider.")
-        pieces = [(i, j, d) for i, j, d, s in toutes if s == "saisie"]
+        # Ordre de saisie (premiere_saisie), et non l'ordre - non garanti par
+        # Postgres pour un GROUP BY sans ORDER BY - dans lequel les lignes
+        # ressortaient sinon. Corrige le 23/09/2026 : un lot valide d'un
+        # coup doit distribuer ses numeros dans l'ordre ou les pieces ont
+        # ete saisies, la premiere saisie recevant le premier numero -
+        # avant ce correctif, l'ordre de distribution etait entierement
+        # imprevisible (ni l'ordre de saisie, ni l'ordre de selection a
+        # l'ecran n'etaient respectes). Une validation piece par piece n'est
+        # pas concernee : une seule ligne a trier n'a rien a trier.
+        en_attente = set()
+        if not autoriser_attente:
+            cur.execute(
+                "SELECT DISTINCT e.id_piece FROM ecritures e WHERE e.id_lien <> '' AND e.id_lien IN "
+                "(SELECT id_lien FROM ecritures WHERE id_piece = ANY(%s) AND compte = %s) "
+                "UNION SELECT DISTINCT id_piece FROM ecritures WHERE id_piece = ANY(%s) AND compte = %s",
+                (ids, md.COMPTE_ATTENTE, ids, md.COMPTE_ATTENTE))
+            en_attente = {r[0] for r in cur.fetchall()}
+        pieces = [(i, j, d) for i, j, d, s, _ in toutes if s == "saisie" and i not in en_attente]
         ignorees = {}
-        for i, _, _, s in toutes:
+        for i, _, _, s, _ in toutes:
             if s != "saisie":
                 ignorees.setdefault(s, []).append(i)
+            elif i in en_attente:
+                ignorees.setdefault("compte_attente", []).append(i)
         if not pieces:
-            detail = ", ".join(f"{len(v)} au statut '{k}'" for k, v in sorted(ignorees.items()))
+            detail = ", ".join(
+                f"{len(v)} sur le compte d'attente {md.COMPTE_ATTENTE}, a reclasser avant validation"
+                if k == "compte_attente" else f"{len(v)} au statut '{k}'"
+                for k, v in sorted(ignorees.items()))
             raise ValueError(f"Aucune piece a valider ({detail}).")
         validees = []
         for idp, journal, date_piece in pieces:
@@ -773,7 +1040,7 @@ def rejeter_pieces(ids, motif, utilisateur):
     passe par une ecriture d'extourne, jamais par une reprise de la piece.
     """
     with _connexion() as c, c.cursor() as cur:
-        ids = avec_liees(ids)
+        ids = _ids_lies(cur, ids)
         cur.execute("SELECT DISTINCT statut FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
         statuts = {r[0] for r in cur.fetchall()}
         if not statuts:
@@ -784,7 +1051,9 @@ def rejeter_pieces(ids, motif, utilisateur):
                 "correction : elle est deja dans le livre officiel. Corriger par une "
                 "ecriture d'extourne.")
         cur.execute(
-            "UPDATE ecritures SET statut = 'a_corriger', observation = %s WHERE id_piece = ANY(%s)",
+            "UPDATE ecritures SET statut = 'a_corriger', observation = %s, "
+            "num_definitif = '', valide_par = '', valide_le = NULL "
+            "WHERE id_piece = ANY(%s)",
             (f"{utilisateur} : {motif}", ids))
         cur.execute("SELECT count(DISTINCT id_piece) FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
         n = cur.fetchone()[0]
@@ -808,7 +1077,7 @@ def marquer_exporte(ids):
     journalisait len(ids), donc un chiffre qui pouvait etre faux.
     """
     with _connexion() as c, c.cursor() as cur:
-        ids = avec_liees(ids)
+        ids = _ids_lies(cur, ids)
         cur.execute(
             "UPDATE ecritures SET statut = 'exportee', exporte_le = now() "
             "WHERE id_piece = ANY(%s) AND statut = 'validee' "
@@ -970,9 +1239,15 @@ def controler(d, ref, d_complet=None):
             rows.append(("a_verifier", num, f"Numero de piece incoherent avec le journal {j_piece}."))
         if (p["libelle"] == "").any():
             rows.append(("a_verifier", num, "Ligne sans libelle."))
-        if "471000" in set(p["compte"]):
-            rows.append(("a_verifier", num,
-                         "Compte d'attente (471000) utilise : operation a reclasser sur le bon compte."))
+        if md.COMPTE_ATTENTE in set(p["compte"]):
+            # Bloquante tant que la piece n'est pas validee (23/09/2026) : on
+            # ne valide plus une piece sur le compte d'attente, il faut
+            # d'abord trouver le bon compte. Les pieces historiques deja
+            # validees restent signalees, sans bloquer quoi que ce soit.
+            non_validee = p["statut"].iloc[0] in ("saisie", "a_corriger") if "statut" in p.columns else True
+            rows.append(("bloquante" if non_validee else "a_verifier", num,
+                         f"Compte d'attente ({md.COMPTE_ATTENTE}) utilise : operation a reclasser "
+                         "sur le bon compte avant validation (onglet Controles)."))
 
     ap = d[d["modele"] == "approvisionnement"]
     if len(ap) > 0:
@@ -1147,7 +1422,7 @@ def ecrire_fichier_sage(x, chemin):
     # filet de securite final : un caractere malgre tout hors cp1252 devient
     # "?" au lieu de faire planter l'ecriture du fichier entier.
     x.to_csv(chemin, sep=";", index=False, header=False, encoding="cp1252",
-              errors="replace", na_rep="")
+              errors="replace", na_rep="", lineterminator="\r\n")
 
 
 # --- synchronisation entre postes -------------------------------------------------
@@ -1158,7 +1433,19 @@ def revision_bd():
     sur une table metier. Remplace la date de modification des fichiers
     Excel guettee par la version precedente : un reactive.poll cote app.py
     interroge cette seule valeur, tres bon marche, au lieu de parcourir un
-    dossier entier sur le disque."""
-    with _connexion() as c, c.cursor() as cur:
-        cur.execute("SELECT valeur FROM revision")
-        return cur.fetchone()[0]
+    dossier entier sur le disque.
+
+    Une seule nouvelle tentative en cas de connexion coupee : c'est la requete
+    la plus frequente de l'application (une par session et par intervalle de
+    sondage), donc celle qui tombe la premiere sur une connexion morte. La
+    premiere tentative la retire du pool (_connexion), la seconde repart sur
+    une connexion neuve. Deux echecs de suite signifient que la base est
+    vraiment injoignable : l'appelant decide alors quoi en faire."""
+    for tentative in (1, 2):
+        try:
+            with _connexion() as c, c.cursor() as cur:
+                cur.execute("SELECT valeur FROM revision")
+                return cur.fetchone()[0]
+        except (psycopg2.InterfaceError, psycopg2.OperationalError):
+            if tentative == 2:
+                raise

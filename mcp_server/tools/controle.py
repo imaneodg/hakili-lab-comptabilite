@@ -24,6 +24,7 @@ def paiements_suspects(mois: str) -> list:
     Un rapprochement n'est pas une accusation : trois reglements identiques le
     meme jour peuvent etre trois enfants d'une meme famille. A presenter comme
     des pieces a verifier, jamais comme des doublons averes."""
+    portee.verifier_non_restreinte("paiements_suspects")
     return an.paiements_suspects(mois)
 
 
@@ -33,6 +34,7 @@ def evolution_reclassement(mois: str) -> dict:
     471000, tous centres confondus) entre le mois donne et le mois
     precedent - indicateur de la charge de travail de reclassement pour le
     comptable."""
+    portee.verifier_non_restreinte("evolution_reclassement")
     return an.evolution_montant_a_reclasser(mois)
 
 
@@ -69,6 +71,7 @@ def transferts_entre_centres(mois: Optional[str] = None) -> dict:
     ne l'est pas alors qu'aucune anomalie n'est signalee, c'est qu'un virement
     de fonds a ete saisi hors du formulaire de transfert - a signaler au
     comptable."""
+    portee.verifier_non_restreinte("transferts_entre_centres")
     return an.transferts_internes(mois)
 
 

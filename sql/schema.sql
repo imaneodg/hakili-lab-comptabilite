@@ -11,6 +11,17 @@
 --     est refusee par la base avant meme d'atteindre logic/donnees.py.
 -- ---------------------------------------------------------------------------
 
+-- Registre des migrations jouees (M4 de l'audit du 18/09, corrige le
+-- 22/09/2026) : creee ici pour qu'une base neuve naisse deja avec, et
+-- lue/alimentee au demarrage par logic/migrations.py. Une base existante
+-- migree depuis avant cette date l'a deja (voir
+-- sql/migrations/2026-09-15_rattrapage_production.sql) ; CREATE ... IF NOT
+-- EXISTS rend les deux cas inoffensifs.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version      text PRIMARY KEY,
+    applied_at   timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS comptes (
     compte              text PRIMARY KEY,
     intitule            text NOT NULL,
@@ -145,7 +156,17 @@ CREATE TABLE IF NOT EXISTS ecritures (
     -- avoir a rejouer les migrations ; la migration reste necessaire pour
     -- les bases deja en service.
     reference_transfert    text NOT NULL DEFAULT '',
-    centre_contrepartie    text NOT NULL DEFAULT ''
+    centre_contrepartie    text NOT NULL DEFAULT '',
+    -- M2 de l'audit du 18/09, corrige le 22/09/2026 : avant, l'equilibre et
+    -- le signe des montants n'etaient verifies que par logic/modeles.py, cote
+    -- application - un appel direct a enregistrer_operation() (ou un import
+    -- comme import_historique.py) pouvait inserer une ligne des deux sens a
+    -- la fois, ou negative. Ce CHECK porte sur une seule ligne (le signe) ;
+    -- l'equilibre PAR PIECE (somme des debits = somme des credits) est
+    -- impose plus bas par un trigger de contrainte differable, parce qu'une
+    -- piece n'est equilibree qu'une fois toutes ses lignes inserees.
+    CONSTRAINT ck_montants_positifs
+        CHECK (debit >= 0 AND credit >= 0 AND NOT (debit > 0 AND credit > 0))
 );
 CREATE INDEX IF NOT EXISTS idx_ecritures_piece   ON ecritures(id_piece);
 CREATE INDEX IF NOT EXISTS idx_ecritures_lien     ON ecritures(id_lien) WHERE id_lien <> '';
@@ -154,6 +175,43 @@ CREATE INDEX IF NOT EXISTS idx_ecritures_statut   ON ecritures(statut);
 CREATE INDEX IF NOT EXISTS idx_ecritures_num_def  ON ecritures(journal, num_definitif);
 CREATE INDEX IF NOT EXISTS idx_ecritures_transfert ON ecritures(reference_transfert)
     WHERE reference_transfert <> '';
+
+-- M6 de l'audit du 18/09, corrige le 22/09/2026 : une seule entree peut
+-- s'apparier a une reference de transfert donnee (compte 585000, au credit,
+-- cote centre destinataire). Sans cet index, deux entrees saisies au meme
+-- instant par deux postes du meme centre pouvaient s'apparier a la MEME
+-- sortie (voir logic.donnees._sortie_a_apparier, qui verrouille desormais
+-- la ligne choisie avec FOR UPDATE ... SKIP LOCKED - cet index reste le
+-- garde-fou qui rend l'anomalie impossible meme si le code applicatif
+-- change plus tard).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_transfert_entree ON ecritures (reference_transfert)
+    WHERE reference_transfert <> '' AND compte = '585000' AND credit > 0;
+
+-- M2 (suite) : equilibre PAR PIECE. DEFERRABLE INITIALLY DEFERRED est
+-- indispensable : l'equilibre d'une piece n'est vrai qu'une fois toutes ses
+-- lignes inserees, jamais apres la premiere. import_historique.py et tout
+-- script futur en beneficient sans rien y changer.
+CREATE OR REPLACE FUNCTION verifier_equilibre_piece() RETURNS trigger AS $$
+DECLARE
+    p text;
+    d numeric;
+    c numeric;
+BEGIN
+    p := CASE WHEN TG_OP = 'DELETE' THEN OLD.id_piece ELSE NEW.id_piece END;
+    SELECT COALESCE(SUM(debit), 0), COALESCE(SUM(credit), 0) INTO d, c
+    FROM ecritures WHERE id_piece = p;
+    IF round(d, 2) <> round(c, 2) THEN
+        RAISE EXCEPTION 'Piece % desequilibree : debit=%, credit=%', p, d, c;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_equilibre_piece ON ecritures;
+CREATE CONSTRAINT TRIGGER trg_equilibre_piece
+    AFTER INSERT OR UPDATE OR DELETE ON ecritures
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION verifier_equilibre_piece();
 
 -- Compteurs de numerotation. Remplace le verrou de repertoire de la version
 -- Excel : ici, l'atomicite vient d'un UPSERT (INSERT ... ON CONFLICT DO

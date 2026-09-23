@@ -632,6 +632,10 @@ Ce dossier est volontairement exclu de Git afin de ne pas envoyer les sauvegarde
 
 
 
+Pour une exécution automatique et régulière (recommandée en production), planifier `backup/cron\_sauvegarde\_host.sh` dans le cron de la machine hôte plutôt que d'appeler `pg\_backup.py` directement : ce script vérifie d'abord que `pg\_dump` et `python3` sont bien présents sur l'hôte, et journalise clairement tout échec au lieu de le laisser disparaître silencieusement. Voir les commentaires en tête de ce script pour la ligne de crontab à ajouter.
+
+
+
 \---
 
 

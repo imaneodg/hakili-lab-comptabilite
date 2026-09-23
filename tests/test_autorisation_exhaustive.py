@@ -47,6 +47,13 @@ DISPENSES = {
     # Il n'y a donc pas de piece d'un autre centre a atteindre, et la saisie
     # est ouverte a tous les roles par construction.
     "_enregistrer_piece",
+    # Creation d'un compte ou d'un tiers : ouverte a tous les roles par
+    # decision d'Afiya du 23/09/2026 (actif immediatement, sans accord du
+    # comptable). Le plan de comptes et le plan tiers sont communs a toute la
+    # maison, il n'y a donc aucun centre a controler ; le format et les
+    # doublons sont verifies dans logic.donnees, l'auteur y est trace.
+    "_ajouter_tiers",
+    "_ajouter_compte",
 }
 
 

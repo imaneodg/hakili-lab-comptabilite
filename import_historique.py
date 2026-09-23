@@ -199,7 +199,10 @@ def importer(dry_run=False):
             importer_fichier(cur, cc_par_journal, fichier_conf, dry_run, resultats)
 
     if not dry_run and resultats["a_valider"]:
-        dl.valider_pieces(resultats["a_valider"], UTILISATEUR_IMPORT)
+        # autoriser_attente=True : ces brouillards sont deja passes en
+        # comptabilite, le 471000 eventuel y est un fait historique a reprendre
+        # tel quel (le blocage du 23/09/2026 vise la validation courante).
+        dl.valider_pieces(resultats["a_valider"], UTILISATEUR_IMPORT, autoriser_attente=True)
     return resultats
 
 

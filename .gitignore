@@ -67,3 +67,6 @@ www/graphiques/
 # Fichiers locaux de l'editeur et copies de sauvegarde manuelles
 *.code-workspace
 backup/app_avant_*.py
+
+# Copies de sauvegarde avant modification (23/09/2026) : restent sur le PC.
+backup/avant_modifs_*/

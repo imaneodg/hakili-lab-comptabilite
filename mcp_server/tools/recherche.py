@@ -27,6 +27,7 @@ def transactions_tiers(tiers: str, mois: Optional[str] = None) -> list:
     """Toutes les lignes d'ecriture d'un tiers (eleve, fournisseur,
     enseignant...), identifie par son code exact ou par une recherche sur son
     nom. Limiter a un mois (AAAAMM) si precise dans la question."""
+    portee.verifier_non_restreinte("transactions_tiers")
     return an.transactions_tiers(tiers, mois)
 
 

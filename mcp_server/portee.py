@@ -66,6 +66,33 @@ def resoudre(centre=None):
     return impose
 
 
+def verifier_non_restreinte(nom_indicateur):
+    """Bloque un outil qui n'a pas de parametre `centre` a filtrer : par
+    construction, il calcule un chiffre consolide tous-centres-confondus
+    (resultat net global, transferts inter-centres, tiers recherche par nom
+    sans centre...). Un tel outil ne peut pas etre "ramene" a un centre comme
+    le fait resoudre() - il n'y a rien a filtrer dans son SQL. La seule
+    protection possible pour une session limitee est donc de refuser l'appel
+    entier, plutot que de renvoyer silencieusement une consolidation globale
+    a un directeur qui ne devrait voir que son propre centre.
+
+    Ajoute le 22/09/2026 (M7 de l'audit du 18/09) : sept outils MCP (les
+    indicateurs consolides de suivi.py et controle.py, la recherche de
+    transactions par tiers) n'appliquaient encore aucun cloisonnement. Le
+    risque etait masque par app.py (onglet Assistant reserve au comptable du
+    siege), exactement comme pour resoudre() - voir le commentaire en tete de
+    ce fichier."""
+    impose = centre_impose()
+    if impose is not None:
+        raise PorteeRefusee(
+            f"Cette session ne donne acces qu'aux donnees du centre {impose}. "
+            f"\"{nom_indicateur}\" est un indicateur consolide sur l'ensemble des "
+            f"centres de Hakili Lab : impossible d'y repondre depuis cette session. "
+            f"Indiquer clairement cette limite plutot que de repondre avec les "
+            f"chiffres de {impose} seul presentes comme un total general."
+        )
+
+
 def restreindre_centres(centres):
     """Filtre une liste de centres (classements, comparaisons) a la portee de
     la session. Un classement inter-centres n'a pas de sens pour un directeur

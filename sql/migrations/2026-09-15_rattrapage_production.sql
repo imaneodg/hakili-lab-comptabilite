@@ -16,16 +16,13 @@
 --   2. psql "$DATABASE_URL" -f sql/diagnostic_production.sql   (pour voir l'etat)
 --
 -- LANCER :
---   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/migrations/2026-09-15_rattrapage_production.sql
+--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f sql/migrations/2026-09-15_rattrapage_production.sql
 --
 -- APRES :
 --   redemarrer l'application, puis Referentiel > Soldes d'ouverture pour
 --   renseigner l'encaisse reelle de chaque centre (CP et CMD demarrent a 0).
 -- ---------------------------------------------------------------------------
 
-\set ON_ERROR_STOP on
-
-BEGIN;
 
 -- --- 0. prerequis : watermark de synchronisation ----------------------------
 -- Recree seulement s'il manque. La fonction est indispensable aux triggers
@@ -175,21 +172,13 @@ INSERT INTO schema_migrations (version) VALUES
     ('2026-09-15_rattrapage_production')
 ON CONFLICT (version) DO NOTHING;
 
-COMMIT;
 
 
 -- --- verification finale ----------------------------------------------------
-
-\echo ''
-\echo '=== MIGRATIONS ENREGISTREES ==='
-SELECT version, applique_le FROM schema_migrations ORDER BY version;
-
-\echo ''
-\echo '=== CONTROLE : ces trois requetes doivent passer sans erreur ==='
-SELECT count(*) AS soldes_par_centre FROM soldes_ouverture_centre;
-SELECT count(*) AS lignes_avec_transfert FROM ecritures WHERE reference_transfert <> '';
-SELECT count(*) AS comptes_verrouillables FROM utilisateurs WHERE tentatives_echouees >= 0;
-
-\echo ''
-\echo 'Rattrapage termine. Redemarrer l''application, puis renseigner les soldes'
-\echo 'd''ouverture reels de chaque centre dans Referentiel > Soldes d''ouverture.'
+-- (23/09/2026) Les commandes psql (set ON_ERROR_STOP, echo) et la requete de
+-- verification finale ont ete retirees : ce fichier est desormais joue au
+-- demarrage par logic/migrations.py, qui l'envoie tel quel a Postgres via
+-- psycopg2 - une commande psql y provoquait une erreur de syntaxe et
+-- l'application refusait de demarrer. De meme BEGIN/COMMIT : le lanceur
+-- ouvre deja sa propre transaction. En ligne de commande, lancer avec
+--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f <ce fichier>

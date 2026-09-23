@@ -43,10 +43,14 @@ from pathlib import Path
 
 APP_PY = Path(__file__).resolve().parent.parent / "app.py"
 
+# _ajouter_tiers et _ajouter_compte sont sortis de cette liste le 23/09/2026 :
+# decision d'Afiya, tout agent peut creer un compte ou un tiers (actif tout de
+# suite). Voir DISPENSES dans test_autorisation_exhaustive.py et le test
+# test_creation_referentiel_exige_une_session ci-dessous.
 FONCTIONS_RESERVEES_AU_COMPTABLE = [
     "_marquer", "_reparer",
     "_ajouter_utilisateur", "_desactiver_utilisateur",
-    "_ajouter_tiers", "_ajouter_compte", "_soldes", "_nouvelle_annee",
+    "_soldes", "_nouvelle_annee",
 ]
 
 FONCTIONS_RESERVEES_A_LA_VALIDATION = ["_valider", "_rejeter"]
@@ -173,3 +177,24 @@ def test_soldes_ne_confond_plus_un_echec_avec_un_succes():
 
     corps = ast.get_source_segment(source, fn_soldes)
     assert "echecs" in corps, "_soldes() ne semble plus accumuler/signaler les echecs par journal"
+
+
+def test_creation_referentiel_exige_une_session():
+    # Ouvertes a tous les roles, mais jamais sans utilisateur connecte : la
+    # premiere instruction lit util(), la seconde sort si personne n'est
+    # connecte, et l'identifiant est transmis pour tracer l'auteur.
+    arbre = ast.parse(APP_PY.read_text(encoding="utf-8"))
+    fonctions = _fonctions_par_nom(arbre, ["_ajouter_tiers", "_ajouter_compte"])
+    assert set(fonctions) == {"_ajouter_tiers", "_ajouter_compte"}
+    for nom, defs in fonctions.items():
+        d = defs[0]
+        assert _appelle(d.body[0], "util"), f"{nom} doit commencer par u = util()"
+        assert isinstance(d.body[1], ast.If), f"{nom} doit sortir si aucun utilisateur n'est connecte"
+        assert any(isinstance(n, ast.keyword) and n.arg == "par" for n in ast.walk(d)), \
+            f"{nom} doit transmettre l'auteur (par=...) a logic.donnees"
+
+
+def test_corriger_depuis_validation_est_reserve_a_la_validation():
+    arbre = ast.parse(APP_PY.read_text(encoding="utf-8"))
+    defs = _fonctions_par_nom(arbre, ["_corriger_depuis_validation"])["_corriger_depuis_validation"]
+    assert _premiere_instruction_est_garde(defs[0], "est_validateur")

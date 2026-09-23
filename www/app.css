@@ -28,6 +28,11 @@
   --hk-primaire:        #1A5FD0;
   --hk-primaire-fonce:  #1548A6;
   --hk-primaire-clair:  #EAF2FD;
+  /* Lignes de tableau (Brouillard, Validation, Controles) : voir la regle
+     .shiny-data-grid tbody tr[aria-selected] plus bas. */
+  --hk-selection:        #BCD3F7;
+  --hk-selection-survol: #A9C6F3;
+  --hk-survol:           #E6EEFA;
   --hk-sidebar:         #0F2D5C;
   --hk-sidebar-actif:   #1D63D8;
   --hk-sidebar-texte:   #C7D6EC;
@@ -543,8 +548,28 @@ table.apercu tfoot td { font-weight:700; border-top:2px solid var(--hk-texte); }
   border-bottom:1px solid var(--hk-bordure) !important; padding:14px 16px !important; }
 .shiny-data-grid tbody td { border-bottom:1px solid var(--hk-bordure-douce) !important;
   padding:14px 16px !important; }
-.shiny-data-grid tbody tr:hover td { background:var(--hk-filtres) !important; }
-.shiny-data-grid tbody tr[aria-selected="true"] td { background:var(--hk-primaire-clair) !important; }
+/* Survol et selection (23/09/2026) : l'ancien bleu de selection
+   (--hk-primaire-clair, #EAF2FD) etait presque blanc - on ne voyait pas
+   quelles pieces etaient choisies avant de cliquer "Valider". Trois
+   repères cumules, pour rester lisible meme sur un ecran de caisse
+   mal regle : fond bleu moyen, barre bleue a gauche, texte en gras. Le
+   survol garde un gris-bleu plus leger, pour ne jamais etre confondu avec
+   une ligne choisie. La cellule Statut conserve sa pastille de couleur. */
+.shiny-data-grid tbody tr:hover td { background:var(--hk-survol) !important; cursor:pointer; }
+.shiny-data-grid tbody tr[aria-selected="true"] td { background:var(--hk-selection) !important;
+  color:var(--hk-texte); font-weight:600; }
+.shiny-data-grid tbody tr[aria-selected="true"]:hover td { background:var(--hk-selection-survol) !important; }
+.shiny-data-grid tbody tr[aria-selected="true"] td:first-child {
+  box-shadow:inset 4px 0 0 var(--hk-primaire); }
+.shiny-data-grid tbody tr[aria-selected="true"] td.cell-statut-saisie { background:var(--hk-primaire-clair) !important;
+  color:var(--hk-primaire); }
+.shiny-data-grid tbody tr[aria-selected="true"] td.cell-statut-validee { background:var(--hk-succes-clair) !important;
+  color:var(--hk-succes); }
+.shiny-data-grid tbody tr[aria-selected="true"] td.cell-statut-a_corriger { background:var(--hk-erreur-clair) !important;
+  color:var(--hk-erreur); }
+.shiny-data-grid tbody tr[aria-selected="true"] td.cell-statut-exportee { background:var(--hk-neutre-clair) !important;
+  color:var(--hk-neutre); }
+.shiny-data-grid tbody tr:focus-visible { outline:2px solid var(--hk-primaire); outline-offset:-2px; }
 .shiny-data-grid input { border-radius:var(--hk-rayon-champ) !important; border-color:var(--hk-bordure) !important;
   font-size:12.5px !important; }
 

@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import base64
 import uuid
@@ -41,13 +41,57 @@ logging.basicConfig(
               logging.StreamHandler()],
 )
 
+logger = logging.getLogger("hakili.app")
+
 import logic.donnees as dl
+from logic import migrations as _migrations
+
+# Corrige le 22/09/2026 (M4 de l'audit du 18/09) : la table schema_migrations
+# existait depuis le 15/09 mais rien ne la lisait - un deploiement sans une
+# migration jouee plantait au premier ecran ouvert (panne du 15/09/2026),
+# sans dire pourquoi. Applique ici, au tout debut du demarrage : si une
+# migration echoue, l'application refuse de demarrer et nomme le fichier
+# fautif - infiniment plus sain qu'un ecran d'erreur Postgres decouvert par
+# la premiere caissiere qui ouvre la page.
+_migrations.appliquer()
+
 import logic.modeles as md
 import logic.questions_assistant as qa
 import logic.graphiques as gr
 from chat_config import get_chat_client
 from chatlas import ContentToolResult
 from composants import titre_page, carte_bandeau, hk_info, filtre, filtres, stat
+
+_DOSSIER_GRAPHIQUES = Path(__file__).parent / "www" / "graphiques"
+
+
+def _purger_graphiques_perimes(age_max_heures=24):
+    """Retire les graphiques generes par l'assistant IA depuis plus de
+    age_max_heures. Corrige le 22/09/2026 (m6 de l'audit du 18/09) : ces
+    fichiers etaient ecrits sans jamais etre supprimes (un par reponse
+    graphique), ce qui remplissait le disque au fil du temps et perdait les
+    liens des anciennes reponses du chat a chaque redeploiement (le dossier
+    n'est pas un volume Docker).
+
+    Restent servis sans authentification via static_assets : un data-URI a
+    ete essaye le 12/09/2026 et ne fonctionne pas, le composant chat de Shiny
+    sanitizant le HTML issu du markdown et n'autorisant que les schemas
+    http/https pour un <img src=...>. Le nom de fichier en UUID4 rend l'acces
+    impossible a deviner en pratique ; une vraie route authentifiee
+    demanderait de remplacer static_assets par un point d'entree Shiny
+    dedie - changement plus large, non fait ici."""
+    if not _DOSSIER_GRAPHIQUES.is_dir():
+        return
+    limite = datetime.now().timestamp() - age_max_heures * 3600
+    for f in _DOSSIER_GRAPHIQUES.glob("*.png"):
+        try:
+            if f.stat().st_mtime < limite:
+                f.unlink()
+        except OSError:
+            pass
+
+
+_purger_graphiques_perimes()
 
 AUCUNE_SUGGESTION = "Choisissez une catégorie ci-dessus"
 
@@ -203,7 +247,7 @@ def server(input, output, session):
 
     # Plusieurs postes travaillent en meme temps sur la meme base. Un objet
     # reactif ne peut pas deviner qu'un autre poste vient d'ecrire en base :
-    # on interroge donc, deux fois par seconde, le watermark tenu par
+    # on interroge donc regulierement le watermark tenu par
     # Postgres (table revision, incrementee par trigger a chaque ecriture
     # metier) ; tant qu'il ne bouge pas, rien n'est relu.
     #
@@ -211,9 +255,39 @@ def server(input, output, session):
     # connexion : un eleve cree a l'instant par la caisse de Pissy lui reste
     # invisible, et son onglet Controles annonce "Tiers inconnu" pour un tiers
     # qui existe bel et bien en base.
-    @reactive.poll(dl.revision_bd, 0.5)
+    # Corrige le 18/09/2026 : ce sondage appelait dl.revision_bd()
+    # directement. Une base momentanement injoignable (redemarrage du
+    # conteneur db, coupure du reseau interne de Docker, connexion fermee par
+    # Postgres) y levait une exception EN PLEIN CYCLE REACTIF de Shiny, qui
+    # termine alors la session : l'ecran se grise, plus rien ne repond, et
+    # tout ce qui etait en cours de saisie est perdu - il faut recharger la
+    # page. C'est le defaut signale par Afiya ("l'ecriture ne se construit
+    # plus, le bouton n'enregistre rien"), et il tombait de preference sur ce
+    # sondage parce que c'est, de loin, la requete la plus frequente de
+    # l'application : une par session et par intervalle, sans interruption.
+    #
+    # La coupure est desormais absorbee : on garde la derniere revision
+    # connue, l'application continue d'afficher ce qu'elle a deja en memoire,
+    # et le premier sondage qui aboutit reprend le fil normalement. Seule une
+    # ligne de journal signale l'incident.
+    #
+    # Intervalle porte de 0,5 s a 2 s : la fraicheur reste largement
+    # suffisante pour voir arriver l'ecriture d'un autre poste, et le nombre
+    # de connexions empruntees au pool est divise par quatre - donc aussi les
+    # occasions de tomber sur une connexion morte.
+    derniere_revision = {"valeur": None}
+
+    def _revision_tolerante():
+        try:
+            derniere_revision["valeur"] = dl.revision_bd()
+        except Exception:
+            logger.warning("Sondage de la revision impossible : la derniere "
+                           "valeur connue est conservee.", exc_info=True)
+        return derniere_revision["valeur"]
+
+    @reactive.poll(_revision_tolerante, 2.0)
     def _disque():
-        return dl.revision_bd()
+        return _revision_tolerante()
 
     @reactive.calc
     def ref():
@@ -223,6 +297,35 @@ def server(input, output, session):
     util = reactive.value(None)          # utilisateur connecte
     login_msg = reactive.value(None)
     dernier_msg = reactive.value(None)
+    # Figee au moment de l'affichage de la modale "Marquer comme exportees"
+    # (corrige le 22/09/2026, M5 de l'audit du 18/09) : voir _marquer/
+    # _marquer_confirme plus bas. Sans cela, _marquer_confirme recalculait
+    # a_exporter() au moment du clic, qui pouvait differer de ce que le
+    # comptable venait de confirmer si une pièce etait validee entretemps.
+    ids_a_marquer = reactive.value([])
+
+    @reactive.effect
+    def _revalider_compte_actif():
+        # Corrige le 22/09/2026 (m2 de l'audit du 18/09) : le sondage de
+        # revision (_disque(), toutes les 2 s) revalidait deja la fraicheur
+        # des donnees, jamais le statut du compte connecte. Un compte
+        # desactive pendant qu'une session est ouverte (depart d'un salarie,
+        # erreur de saisie corrigee) restait pleinement utilisable jusqu'a la
+        # fermeture du navigateur. Se raccroche au meme sondage plutot que
+        # d'en creer un second : c'est deja la requete la plus frequente de
+        # l'application, autant y ajouter un controle bon marche.
+        _disque()
+        u = util()
+        if u is None:
+            return
+        try:
+            actif = dl.est_actif(u["identifiant"])
+        except Exception:
+            return  # base momentanement injoignable : ne pas deconnecter a tort
+        if not actif:
+            correction.set(None)
+            util.set(None)
+            login_msg.set("Ce compte a ete desactive.")
     # Piece en cours de correction : None, ou {"id_piece","modele","journal",
     # "valeurs"}. Rempli quand on clique "Corriger" dans le Brouillard,
     # consomme et efface a l'enregistrement de la piece corrigee.
@@ -517,6 +620,9 @@ def server(input, output, session):
                     ui.input_action_button("v_rejeter", "Renvoyer pour correction",
                                             icon=ui.tags.i({"class": "bi bi-arrow-counterclockwise"}),
                                             class_="hk-btn-secondaire"),
+                    ui.input_action_button("v_corriger", "Corriger la pièce",
+                                            icon=ui.tags.i({"class": "bi bi-pencil"}),
+                                            class_="hk-btn-secondaire"),
                     # Compteur de selection : seul moyen pour la validatrice
                     # de voir qu'un clic simple a remplace sa selection, ou
                     # qu'un filtre de colonne vient de l'amputer (la grille
@@ -531,6 +637,9 @@ def server(input, output, session):
                 hk_info([
                     "Valider une pièce liée à une autre (ex. versement en banque) valide aussi sa jumelle.",
                     "Une pièce comportant une anomalie bloquante ne peut pas être validée.",
+                    "Une pièce sur le compte d'attente 471000 doit être reclassée (onglet Contrôles) "
+                    "avant validation.",
+                    "« Corriger la pièce » ouvre la pièce choisie dans Saisie, déjà remplie.",
                     "Le motif du renvoi est obligatoire pour renvoyer une pièce pour correction.",
                     "Un validateur local n'agit que sur les pièces de son propre centre.",
                 ]),
@@ -721,12 +830,15 @@ def server(input, output, session):
         blocs = [ui.row(
             ui.column(6, ui.div(
                 {"class": "carte"},
-                entete("journal-text", "Plan de comptes", "compte" if comptable else None, "panneau_compte"),
+                # Creation ouverte a tous les roles depuis le 23/09/2026
+                # (voir _ajouter_compte) ; le reste du referentiel reste au
+                # comptable du siege.
+                entete("journal-text", "Plan de comptes", "compte", "panneau_compte"),
                 ui.output_data_frame("r_comptes"),
                 ui.output_ui("lien_comptes"))),
             ui.column(6, ui.div(
                 {"class": "carte"},
-                entete("person-badge", "Comptes de tiers", "tiers" if comptable else None, "panneau_tiers"),
+                entete("person-badge", "Comptes de tiers", "tiers", "panneau_tiers"),
                 ui.output_data_frame("r_tiers"),
                 ui.output_ui("lien_tiers"))),
         )]
@@ -789,7 +901,7 @@ def server(input, output, session):
             return None
         return ui.div(
             {"class": "popover-form panneau-flottant"},
-            ui.input_text("r_num_compte", "Numéro"),
+            ui.input_text("r_num_compte", "Numéro", placeholder="6 chiffres, ex. 605100"),
             ui.input_text("r_intitule_compte", "Intitulé"),
             ui.input_select("r_nature_compte", "Nature",
                              choices={"charge": "Charge", "produit": "Produit",
@@ -806,7 +918,7 @@ def server(input, output, session):
             return None
         return ui.div(
             {"class": "popover-form panneau-flottant"},
-            ui.input_text("r_code", "Code tiers"),
+            ui.input_text("r_code", "Code tiers", placeholder="ex. KABORE (le préfixe est ajouté)"),
             ui.input_text("r_nom", "Intitulé"),
             ui.input_select("r_collectif", "Collectif",
                              choices={"411000": "411000 - Élève", "401000": "401000 - Fournisseur",
@@ -991,7 +1103,7 @@ def server(input, output, session):
         )
 
     # Corrige le 10/09/2026 : page() appelait onglets(u) directement, qui lit
-    # ref() -> _disque() (sondage 0,5 s sur les ecritures des 5 centres,
+    # ref() -> _disque() (sondage 2 s sur les ecritures des 5 centres,
     # cf. plus haut). Consequence : chaque piece enregistree n'importe ou
     # invalidait page() entierement - tous les onglets recrees, m_modele et
     # m_journal remis a leur valeur par defaut, formulaire de Saisie en
@@ -1049,6 +1161,12 @@ def server(input, output, session):
         saisi = str(input.l_id() or "").strip().lower()
         statut, u, minutes = dl.tenter_connexion(saisi, input.l_centre(), input.l_code())
         if statut == "ok":
+            # Une correction commencee sous une autre session (autre centre,
+            # autre utilisateur) ne doit jamais survivre au changement de
+            # connexion : sinon la saisie suivante etait prise pour la
+            # correction d'une piece d'un autre centre et refusee (constate
+            # le 23/09/2026 : correction ouverte sur SIE, reconnexion sur NAG).
+            _oublier_saisie_en_cours()
             util.set(u)
             login_msg.set(None)
         elif statut == "inactif":
@@ -1061,7 +1179,12 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.deconnexion)
     def _deconnexion():
+        _oublier_saisie_en_cours()
         util.set(None)
+
+    def _oublier_saisie_en_cours():
+        correction.set(None)
+        dernier_msg.set(None)
 
     # ---------------- formulaire "encaissement" : lignes de repartition ------
     #
@@ -1080,10 +1203,20 @@ def server(input, output, session):
     # m_bloc_historique() (neutralisee depuis le 7 septembre, cf. plus bas) :
     # retires ici car m_lien_historique n'est cree nulle part.
     # Chaque "Vider" repart sur un identifiant neuf (jamais reutilise, cf.
-    # reinitialiser()) : cet ensemble evite de re-enregistrer un effet
-    # deja cree pour ce meme identifiant. Jamais purge - sans consequence,
-    # l'effet ne fait rien de plus la seconde fois qu'il s'applique.
-    rep_effets_crees = set()
+    # reinitialiser()) : ce dictionnaire evite de re-enregistrer un effet
+    # deja cree pour ce meme identifiant, et permet de detruire proprement
+    # les effets d'un identifiant retire (corrige le 22/09/2026, m9 de
+    # l'audit du 18/09 : avant, rien n'etait jamais detruit, et
+    # reinitialiser() en particulier accumulait deux effets orphelins a
+    # chaque enregistrement de piece).
+    rep_effets_crees = {}
+
+    def _detruire_effets_repartition(rid):
+        for ef in rep_effets_crees.pop(rid, []):
+            try:
+                ef.destroy()
+            except Exception:
+                pass
 
     # Suggestion de mois selon la nature choisie (spec §4) : "Frais" propose
     # le mois calendaire en cours, "Avance" le mois suivant le dernier
@@ -1131,7 +1264,7 @@ def server(input, output, session):
     def _fabrique_effets_repartition(rid):
         if rid in rep_effets_crees:
             return
-        rep_effets_crees.add(rid)
+        effets = []
 
         @reactive.effect
         @reactive.event(input[f"m_rep_nature_{rid}"])
@@ -1142,11 +1275,18 @@ def server(input, output, session):
             propose = _mois_suggere(nature, _code_tiers_saisi())
             ui.update_selectize(f"m_rep_mois_{rid}", selected=[propose] if propose else [])
 
+        effets.append(_maj_mois_suggere)
+
         if rid != 1:
             @reactive.effect
             @reactive.event(input[f"m_rep_suppr_{rid}"])
             def _retirer_ligne():
+                _detruire_effets_repartition(rid)
                 rep_ids.set([x for x in rep_ids() if x != rid])
+
+            effets.append(_retirer_ligne)
+
+        rep_effets_crees[rid] = effets
 
     _fabrique_effets_repartition(1)
 
@@ -1506,7 +1646,7 @@ def server(input, output, session):
         m = md.modele_par_id(req(input.m_modele()))
         # Corrige le 10/09/2026 (ter) : ref() etait lu directement ici. Comme
         # operation()/m_apercu()/m_ruban() dependent tous de valeurs(), toute
-        # ecriture enregistree ailleurs (sondage _disque(), 0,5 s) reconstruisait
+        # ecriture enregistree ailleurs (sondage _disque(), 2 s) reconstruisait
         # l'apercu "Ecriture generee" en entier meme sans rien y toucher - Afiya
         # l'a signale comme "ca bouge" a l'ouverture et pendant la saisie du
         # montant. Meme traitement que pour m_champs() (Groupe 6) : la lecture
@@ -1521,7 +1661,12 @@ def server(input, output, session):
         # n'est pas un champ du formulaire, il se deduit de qui saisit.
         with reactive.isolate():
             u_courant = util()
-        v["mon_centre"] = (u_courant or {}).get("centre", "")
+        # Pendant une correction, c'est le centre de la piece d'origine qui
+        # compte, pas celui de la personne qui corrige : le comptable du
+        # siege qui corrige une sortie de Pissy doit produire une sortie de
+        # Pissy (23/09/2026, correction ouverte aux validateurs).
+        cor_c = correction()
+        v["mon_centre"] = (cor_c or {}).get("centre") or (u_courant or {}).get("centre", "")
         for ch in champs:
             v[ch["n"]] = get_input(f"ch_{ch['n']}")
         for ch in champs:
@@ -1594,7 +1739,7 @@ def server(input, output, session):
         if op is None:
             return ui.div({"class": "ruban att"}, "Renseignez l'operation : l'ecriture se construit ici.")
         # Meme correctif que valeurs() ci-dessus : ne pas rendre m_apercu()
-        # dependant de _disque() (0,5 s), sinon tout l'apercu "Ecriture
+        # dependant de _disque() (2 s), sinon tout l'apercu "Ecriture
         # generee" se reconstruit en boucle pendant que la piece se remplit.
         with reactive.isolate():
             r = ref()
@@ -1635,7 +1780,7 @@ def server(input, output, session):
         if op is None:
             return None
         # Meme correctif que m_apercu()/valeurs() : r et donnees() ne doivent
-        # pas rendre ce ruban dependant de _disque() (0,5 s) ni du sondage
+        # pas rendre ce ruban dependant de _disque() (2 s) ni du sondage
         # d'ecritures - seul un vrai changement de la piece en cours (modele,
         # journal, champs) doit le reconstruire.
         with reactive.isolate():
@@ -1662,7 +1807,7 @@ def server(input, output, session):
                 # caissiere qui fait un versement en banque voit l'effet sur
                 # sa propre caisse (ci-dessous), jamais le solde de la banque.
                 continue
-            centre_c = u["centre"] if physique else None
+            centre_c = ((correction() or {}).get("centre") or u["centre"]) if physique else None
             apres = dl.solde_caisse(j, r, d, centre=centre_c) + val
             sens = "diminue" if val < 0 else "augmente"
             morceaux.append(f"caisse {j} {sens} de <span class='num'>{dl.fcfa(abs(val))}</span> F, "
@@ -1725,26 +1870,39 @@ def server(input, output, session):
                                  "l'ecriture n'aurait aucun effet.", type="error")
             return
 
+        note = get_input("m_note", "") if input.m_modele() == "libre" else ""
+        cor = correction()
+        # Une correction remplace une piece existante : meme regle de centre
+        # que _supprimer (23/09/2026, la correction etant ouverte a toute
+        # piece non validee). avec_liees() d'abord, comme partout ailleurs.
+        if cor is not None and not est_comptable():
+            if _hors_centre(dl.avec_liees([cor["id_piece"]]), donnees(), u):
+                ui.notification_show(
+                    f"Correction en cours de la pièce {cor['id_piece']}, qui appartient à un autre "
+                    "centre. Cliquez sur « Annuler la correction » en haut de la page pour "
+                    "enregistrer une nouvelle opération.", type="error", duration=10)
+                return
         try:
-            note = get_input("m_note", "") if input.m_modele() == "libre" else ""
-            res = dl.enregistrer_operation(op, u["centre"], input.m_date(), input.m_modele(),
-                                            u["identifiant"], note=note, valeurs=v_resolues)
+            if cor is not None:
+                # Corrige le 22/09/2026 (M3 de l'audit du 18/09) : enregistrer
+                # la nouvelle piece et retirer l'ancienne dans UNE SEULE
+                # transaction (dl.remplacer_piece), plutot que deux appels
+                # separes qui pouvaient laisser les deux pieces coexister en
+                # base si le second (la suppression) echouait.
+                # Centre d'origine de la piece, pas celui de la personne qui
+                # corrige (le comptable du siege peut corriger pour un centre).
+                res = dl.remplacer_piece(cor["id_piece"], op, cor.get("centre") or u["centre"],
+                                          input.m_date(),
+                                          input.m_modele(), u["identifiant"], note=note,
+                                          valeurs=v_resolues)
+            else:
+                res = dl.enregistrer_operation(op, u["centre"], input.m_date(), input.m_modele(),
+                                                u["identifiant"], note=note, valeurs=v_resolues)
         except Exception as e:
             ui.notification_show(str(e), type="error")
             return
 
-        # Si on venait de "Corriger" : la nouvelle piece est enregistree,
-        # l'ancienne (a_corriger) n'a plus de raison d'exister. Une erreur ici
-        # (piece deja supprimee entre-temps par le comptable, par exemple)
-        # n'annule pas l'enregistrement qui vient de reussir - elle est juste
-        # signalee a part.
-        cor = correction()
         if cor is not None:
-            try:
-                dl.supprimer_piece(cor["id_piece"], u["identifiant"])
-            except Exception as e:
-                ui.notification_show(f"Piece corrigee, mais l'ancienne n'a pas pu etre retiree : {e}",
-                                      type="warning")
             correction.set(None)
             ui.notification_show(f"Correction enregistree : {', '.join(res)} remplace {cor['id_piece']}",
                                   type="message")
@@ -1814,6 +1972,8 @@ def server(input, output, session):
         # sur les valeurs par defaut. Cela evite la course entre ui.update_numeric()
         # (message asynchrone vers le client) et le re-rendu de m_bloc_repartition,
         # qui relirait sinon l'ancien montant cote serveur et le reafficherait.
+        for rid_ancien in rep_ids():
+            _detruire_effets_repartition(rid_ancien)
         nouveau = rep_prochain_id()
         rep_prochain_id.set(nouveau + 1)
         _fabrique_effets_repartition(nouveau)
@@ -2028,15 +2188,34 @@ def server(input, output, session):
     # et renvoye. L'ancienne piece n'est retiree qu'a l'enregistrement de la
     # nouvelle (_enregistrer), jamais avant : abandonner une correction en
     # cours de route ne doit rien casser.
+    #
+    # 23/09/2026 : le bouton sert desormais a toute piece NON VALIDEE
+    # ('saisie' ou 'a_corriger'), plus seulement a une piece renvoyee, et il
+    # existe aussi dans l'onglet Validation (v_corriger) pour que le
+    # validateur corrige lui-meme au lieu de renvoyer. Une piece validee ou
+    # exportee reste intouchable : elle est numerotee, voire deja dans Sage.
     @reactive.effect
     @reactive.event(input.b_corriger)
     def _corriger():
-        sel = b_table.data_view(selected=True)
+        _ouvrir_correction(b_table.data_view(selected=True))
+
+    @reactive.effect
+    @reactive.event(input.v_corriger)
+    def _corriger_depuis_validation():
+        if not est_validateur():
+            ui.notification_show("Action réservée à la validation.", type="error")
+            return
+        _ouvrir_correction(v_table.data_view(selected=True))
+
+    def _ouvrir_correction(sel):
+        u = util()
+        if u is None:
+            return
         if len(sel) == 0 or "Message" in sel.columns:
             ui.notification_show("Choisir d'abord une pièce.", type="warning")
             return
         if len(sel) > 1:
-            ui.notification_show("Choisir une seule piece a corriger.", type="warning")
+            ui.notification_show("Choisir une seule pièce à corriger.", type="warning")
             return
         idp = sel.index[0]
         d = donnees()
@@ -2044,8 +2223,13 @@ def server(input, output, session):
         if len(p) == 0:
             ui.notification_show("Pièce introuvable.", type="error")
             return
-        if p["statut"].iloc[0] != "a_corriger":
-            ui.notification_show("Seule une piece renvoyee pour correction peut etre corrigee ainsi.",
+        # Lecture seule ici, mais on refuse des maintenant ce que
+        # _enregistrer_piece refuserait de toute facon a l'enregistrement.
+        if not est_comptable() and _hors_centre([idp], d, u):
+            ui.notification_show("Cette pièce appartient à un autre centre.", type="error")
+            return
+        if p["statut"].iloc[0] not in ("saisie", "a_corriger"):
+            ui.notification_show("Une pièce validée ou exportée ne peut plus être corrigée.",
                                   type="warning")
             return
         modele = p["modele"].iloc[0]
@@ -2064,7 +2248,8 @@ def server(input, output, session):
         except Exception:
             date_piece = date.today()
         correction.set({"id_piece": idp, "modele": modele, "journal": journal,
-                         "valeurs": vals, "restaure": restaure})
+                         "valeurs": vals, "restaure": restaure,
+                         "centre": str(p["centre"].iloc[0] or u["centre"])})
         ui.update_select("m_modele", selected=modele)
         ui.update_select("m_journal", selected=journal)
         ui.update_date("m_date", value=date_piece)
@@ -2133,6 +2318,7 @@ def server(input, output, session):
     # resaisie par la caissiere" lui rappelle qu'il a une relance a passer.
     RAISON_NON_VALIDABLE = {
         "a_corriger": "à corriger — en attente de resaisie par la caissière",
+        "compte_attente": "compte d'attente 471000 à reclasser avant validation",
         "validee": "déjà validée",
         "exportee": "déjà exportée vers Sage",
     }
@@ -2298,7 +2484,7 @@ def server(input, output, session):
         if x is None:
             yield ""
             return
-        texte = x.to_csv(sep=";", index=False, header=False, lineterminator="\n", na_rep="")
+        texte = x.to_csv(sep=";", index=False, header=False, lineterminator="\r\n", na_rep="")
         # Corrige le 10/09/2026 : cp1252 (au lieu de latin1) couvre en plus
         # "oe", les guillemets typographiques et le tiret cadratin ; et on
         # encode nous-memes avec errors="replace" plutot que de laisser
@@ -2356,6 +2542,10 @@ def server(input, output, session):
         # explicitement l'ecart avec ce qui est affiche, et on attend une
         # confirmation.
         ids = list(dict.fromkeys(d["id_piece"]))
+        # Corrige le 22/09/2026 (M5) : la liste confirmee par le comptable
+        # est celle-ci, figee ici - _marquer_confirme() ne doit plus la
+        # recalculer au moment du clic.
+        ids_a_marquer.set(ids)
         affichees = _pieces_affichees_export()
         avertissement = None
         if affichees is not None and len(affichees) < len(ids):
@@ -2385,10 +2575,13 @@ def server(input, output, session):
             ui.notification_show("Action réservée au comptable.", type="error")
             return
         ui.modal_remove()
-        d = a_exporter()
-        if len(d) == 0:
+        # Corrige le 22/09/2026 (M5 de l'audit du 18/09) : on reprend la
+        # liste figee au moment de l'affichage de la modale, jamais un nouvel
+        # appel a a_exporter() - qui pouvait differer de ce qui a ete montre
+        # au comptable si une piece etait validee entre les deux.
+        ids = ids_a_marquer()
+        if not ids:
             return
-        ids = list(dict.fromkeys(d["id_piece"]))
         try:
             n = dl.marquer_exporte(ids)
         except Exception as e:
@@ -2732,22 +2925,25 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_ajouter)
     def _ajouter_tiers():
-        # Le panneau "Comptes de tiers" n'est rendu qu'au comptable ; meme
-        # filet de securite cote serveur que _valider.
-        if not est_comptable():
-            ui.notification_show("Action réservée au comptable.", type="error")
+        # Ouvert a TOUS les roles depuis le 23/09/2026 (decision d'Afiya) : le
+        # tiers est actif des sa creation, sans accord du comptable. Il faut
+        # seulement une session ouverte ; le format du code et le doublon
+        # sont controles par dl.ajouter_tiers(), qui trace aussi l'auteur.
+        # Aucune dimension "centre" ici : le plan tiers est commun a la maison.
+        u = util()
+        if u is None:
             return
         if not str(input.r_code() or "").strip():
+            ui.notification_show("Saisir le code tiers.", type="warning")
             return
         ui.update_action_button("r_ajouter", disabled=True)
         try:
-            dl.ajouter_tiers(str(input.r_code() or "").strip().upper(),
-                              str(input.r_nom() or "").strip().upper(),
-                              input.r_collectif())
+            code = dl.ajouter_tiers(input.r_code(), input.r_nom(), input.r_collectif(),
+                                    par=u["identifiant"])
         except Exception as e:
             ui.notification_show(str(e), type="error")
         else:
-            ui.notification_show("Tiers créé", type="message")
+            ui.notification_show(f"Tiers {code} créé", type="message")
             panneau_ouvert.set(None)
             rafraichir()
         finally:
@@ -2756,12 +2952,14 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.r_ajouter_compte)
     def _ajouter_compte():
-        # Le panneau "Plan de comptes" n'est rendu qu'au comptable ; meme
-        # filet de securite cote serveur que _valider.
-        if not est_comptable():
-            ui.notification_show("Action réservée au comptable.", type="error")
+        # Ouvert a TOUS les roles depuis le 23/09/2026, meme regle que
+        # _ajouter_tiers : actif immediatement, format (6 chiffres, classe
+        # 1 a 9) et doublon controles par dl.ajouter_compte(), auteur trace.
+        u = util()
+        if u is None:
             return
         if not str(input.r_num_compte() or "").strip():
+            ui.notification_show("Saisir le numéro de compte.", type="warning")
             return
         ui.update_action_button("r_ajouter_compte", disabled=True)
         try:
@@ -2769,7 +2967,8 @@ def server(input, output, session):
                                str(input.r_intitule_compte() or "").strip(),
                                input.r_nature_compte(),
                                tiers_obligatoire="oui" if input.r_tiers_obligatoire() else "non",
-                               depense_courante="oui" if input.r_compte_courante() else "non")
+                               depense_courante="oui" if input.r_compte_courante() else "non",
+                               par=u["identifiant"])
         except Exception as e:
             ui.notification_show(str(e), type="error")
         else:
@@ -2982,10 +3181,10 @@ def server(input, output, session):
                 dl.logger.info("[diag graphique] Outil %s : pas de graphique associe "
                                "ou valeur non tracable", nom_outil)
                 continue
-            dossier = Path(__file__).parent / "www" / "graphiques"
-            dossier.mkdir(parents=True, exist_ok=True)
+            _DOSSIER_GRAPHIQUES.mkdir(parents=True, exist_ok=True)
+            _purger_graphiques_perimes()
             nom_fichier = f"{uuid.uuid4().hex}.png"
-            (dossier / nom_fichier).write_bytes(base64.b64decode(image_b64))
+            (_DOSSIER_GRAPHIQUES / nom_fichier).write_bytes(base64.b64decode(image_b64))
             dl.logger.info("[diag graphique] Graphique pour %s : OK (%s)", nom_outil, nom_fichier)
             return f"\n\n![graphique](graphiques/{nom_fichier})"
         return None
@@ -3029,13 +3228,25 @@ def server(input, output, session):
 
     @chat.on_user_submit
     async def _repondre():
-        # chat.user_input() renvoie un objet avec un champ .text, jamais une
-        # chaine brute directement - chatlas plante sinon en essayant
-        # d'iterer sur l'objet complet.
-        message = chat.user_input()
-        texte = message.text if message is not None else ""
-        stream = await chat_client().stream_async(texte, content="all")
-        await chat.append_message_stream(_flux_avec_graphique(stream))
+        # Corrige le 22/09/2026 (m4 de l'audit du 18/09) : cette fonction ne
+        # revalidait jamais cote serveur le droit d'acces a l'assistant - un
+        # widget cache reste positionnable depuis le client, meme raisonnement
+        # que pour v_valider. La portee reelle restait limitee (_connecter_mcp
+        # sort immediatement pour un non-comptable, donc aucun outil MCP
+        # n'etait enregistre), mais la cle API de Hakili Lab et le prompt
+        # systeme restaient accessibles a n'importe quel compte connecte.
+        if not peut_voir_assistant():
+            return
+        try:
+            # chat.user_input() renvoie un objet avec un champ .text, jamais
+            # une chaine brute directement - chatlas plante sinon en essayant
+            # d'iterer sur l'objet complet.
+            message = chat.user_input()
+            texte = message.text if message is not None else ""
+            stream = await chat_client().stream_async(texte, content="all")
+            await chat.append_message_stream(_flux_avec_graphique(stream))
+        except Exception as e:
+            await chat.append_message(f"Erreur : {e}")
 
     @reactive.effect
     @reactive.event(input.categorie_suggestion)
