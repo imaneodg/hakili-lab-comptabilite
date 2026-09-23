@@ -2109,9 +2109,9 @@ def server(input, output, session):
         r = ref()
         u = util()
         comptable = est_comptable()
-        cc = set(r["journaux"]["compte_contrepartie"])
-        entrees = d.loc[d["compte"].isin(cc), "debit"].sum() if len(d) else 0
-        sorties = d.loc[d["compte"].isin(cc), "credit"].sum() if len(d) else 0
+        # Virements internes (585000) exclus des entrees/sorties et affiches
+        # a part : voir logic/donnees.py::mouvements_caisse.
+        entrees, sorties, virements = dl.mouvements_caisse(d, r)
         jx = r["journaux"]
         if "type" in jx.columns:
             jx = jx[jx["type"].fillna("tresorerie") == "tresorerie"]
@@ -2127,6 +2127,7 @@ def server(input, output, session):
                  icone="file-earmark-text"),
             stat("Entrées en caisse", dl.fcfa(entrees), icone="arrow-down-circle"),
             stat("Sorties de caisse", dl.fcfa(sorties), icone="arrow-up-circle"),
+            stat("Virements internes", dl.fcfa(virements), icone="arrow-left-right"),
         ]
         dtot = donnees()
         for j in jx["journal"]:

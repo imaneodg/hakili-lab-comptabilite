@@ -1176,6 +1176,30 @@ def solde_caisse(journal, ref, d=None, centre=None):
     return ouv + d["debit"].sum() - d["credit"].sum()
 
 
+def mouvements_caisse(d, ref):
+    """Entrees et sorties REELLES de tresorerie sur les pieces `d`, plus les
+    virements internes a part.
+
+    Un virement interne (approvisionnement CMD depuis la CP, transfert entre
+    centres, versement en banque) passe toujours par le 585000 : l'argent
+    sort d'une caisse et entre dans une autre, sans quitter la maison. Le
+    compter en entree ET en sortie gonflait les deux chiffres du meme
+    montant. Toute piece qui touche le 585000 est donc sortie des entrees
+    et sorties et totalisee dans `virements` (montant deplace, compte une
+    seule fois meme si une seule des deux faces est deja saisie).
+
+    Renvoie (entrees, sorties, virements)."""
+    if d is None or len(d) == 0:
+        return 0.0, 0.0, 0.0
+    cc = set(ref["journaux"]["compte_contrepartie"].dropna())
+    internes = set(d.loc[d["compte"] == COMPTE_VIREMENTS_FONDS, "id_piece"])
+    tres = d[d["compte"].isin(cc)]
+    reel = tres[~tres["id_piece"].isin(internes)]
+    virt = tres[tres["id_piece"].isin(internes)]
+    virements = max(float(virt["debit"].sum()), float(virt["credit"].sum()))
+    return float(reel["debit"].sum()), float(reel["credit"].sum()), virements
+
+
 # --- controles (logique identique a la version Excel, purement en memoire) -------
 # Les DataFrames issus de lire_ecritures()/lire_referentiel() ont exactement
 # les memes colonnes qu'avant : controler(), controler_soldes(), anomalies(),
