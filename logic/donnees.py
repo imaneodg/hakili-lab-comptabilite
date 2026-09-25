@@ -752,7 +752,7 @@ def _metadonnees_transfert(cur, centre, modele, valeurs, date_piece, ancienne=No
 
 
 def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs,
-                       ancienne_ref=None):
+                       ancienne_ref=None, reserves=None):
     """Insere les lignes d'une operation dans la transaction du curseur recu,
     sans ouvrir ni fermer de connexion elle-meme. Factorisee le 22/09/2026
     (M3 de l'audit du 18/09) pour etre partagee par enregistrer_operation()
@@ -770,19 +770,24 @@ def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, not
     nums = []
     reference, contrepartie = _metadonnees_transfert(cur, centre, modele, valeurs, date_piece,
                                                      ancienne=ancienne_ref)
+    # reserves : {journal: [numeros]} gardes par une piece corrigee (voir
+    # remplacer_piece). Chaque numero n'est rendu qu'une fois.
+    reserves = {j: list(v) for j, v in (reserves or {}).items()}
     for i_p, p in enumerate(pieces):
         n = _prochain_numero(cur, f"prov:{centre}:{mois}")
         num = f"{centre}-{mois[2:6]}-{n:03d}"
         idp = f"{centre}-{horo}-{n}"
+        dispo = reserves.get(p["journal"]) or []
+        reserve = dispo.pop(0) if dispo else ""
         L = p["lignes"].reset_index(drop=True)
         for i, row in L.iterrows():
             cur.execute(
                 "INSERT INTO ecritures (id_ligne, id_piece, id_lien, num_provisoire, num_definitif, "
-                "journal, centre, date_piece, compte, code_tiers, libelle, debit, credit, modele, "
-                "saisi_par, saisi_le, statut, observation, valeurs_json, "
+                "num_reserve, journal, centre, date_piece, compte, code_tiers, libelle, debit, credit, "
+                "modele, saisi_par, saisi_le, statut, observation, valeurs_json, "
                 "reference_transfert, centre_contrepartie) VALUES "
-                "(%s,%s,%s,%s,'',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),'saisie',%s,%s,%s,%s)",
-                (f"{idp}-{i + 1}", idp, lien, num, p["journal"], centre, str(date_piece),
+                "(%s,%s,%s,%s,'',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),'saisie',%s,%s,%s,%s)",
+                (f"{idp}-{i + 1}", idp, lien, num, reserve, p["journal"], centre, str(date_piece),
                  row["compte"], row["code_tiers"], row["libelle"], float(row["debit"]), float(row["credit"]),
                  modele, utilisateur, str(note or "").strip(), v_json,
                  reference, contrepartie))
@@ -860,6 +865,14 @@ def remplacer_piece(ancien_id, pieces, centre, date_piece, modele, utilisateur, 
         # nouvelle (toujours dans la meme transaction, donc sans risque de
         # perte) : pour un transfert interne, la sortie qu'elle rapprochait
         # redevient ainsi disponible pour la piece corrigee.
+        # Numeros definitifs gardes par l'ancienne piece (renvoyee apres
+        # validation) : transmis a la piece corrigee, par journal.
+        cur.execute(
+            "SELECT DISTINCT id_piece, journal, num_reserve FROM ecritures "
+            "WHERE id_piece = ANY(%s) AND num_reserve <> '' ORDER BY id_piece", (ids,))
+        reserves = {}
+        for _, j, r in cur.fetchall():
+            reserves.setdefault(j, []).append(r)
         cur.execute(
             "SELECT id_piece, row_to_json(ecritures) FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
         lignes = cur.fetchall()
@@ -868,7 +881,7 @@ def remplacer_piece(ancien_id, pieces, centre, date_piece, modele, utilisateur, 
             [(idp, psycopg2.extras.Json(contenu), utilisateur) for idp, contenu in lignes])
         cur.execute("DELETE FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
         nums = _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs,
-                                  ancienne_ref=ancienne_ref)
+                                  ancienne_ref=ancienne_ref, reserves=reserves)
     logger.info("Piece(s) %s : correction de %s par %s (ancienne piece retiree dans la meme transaction).",
                 ", ".join(nums), ancien_id, utilisateur)
     return nums
@@ -928,8 +941,13 @@ def supprimer_piece(id_piece, utilisateur="?"):
         cur.executemany(
             "INSERT INTO suppressions_ecritures (id_piece, contenu, supprime_par) VALUES (%s, %s, %s)",
             [(idp, psycopg2.extras.Json(contenu), utilisateur) for idp, contenu in lignes])
+        cur.execute("SELECT DISTINCT num_reserve FROM ecritures "
+                    "WHERE id_piece = ANY(%s) AND num_reserve <> ''", (ids,))
+        perdus = [r[0] for r in cur.fetchall()]
         cur.execute("DELETE FROM ecritures WHERE id_piece = ANY(%s)", (ids,))
         logger.info("Piece(s) supprimee(s) par %s : %s", utilisateur, ", ".join(ids))
+        if perdus:
+            logger.warning("Numero(s) definitif(s) abandonne(s) par la suppression : %s", ", ".join(perdus))
         return len(ids)
 
 
@@ -964,24 +982,23 @@ def valider_pieces(ids, utilisateur, autoriser_attente=False):
         ids = _ids_lies(cur, ids)
         # On lit TOUTES les pieces demandees, pas seulement les validables :
         # c'est ce qui permet de dire pourquoi les autres sont ecartees.
+        # 25/09/2026 : les numeros suivent la DATE, puis le CENTRE (ordre
+        # fixe de centres.ordre : SIAO, Tampouy, Saaba, Pissy, Nagrin), puis
+        # l'heure de saisie. Dans Sage, ou le journal se lit par date, les
+        # numeros d'un lot se suivent donc sans retour en arriere. Un centre
+        # absent du lot est simplement saute. Une piece oubliee et validee
+        # plus tard prend le numero suivant, comme dans Sage.
         cur.execute(
-            "SELECT id_piece, journal, date_piece, statut, min(saisi_le) AS premiere_saisie "
-            "FROM ecritures WHERE id_piece = ANY(%s) "
-            "GROUP BY id_piece, journal, date_piece, statut "
-            "ORDER BY premiere_saisie",
+            "SELECT e.id_piece, e.journal, e.date_piece, e.statut, min(e.saisi_le) AS premiere_saisie, "
+            "       max(e.num_reserve) AS reserve, coalesce(min(c.ordre), 99) AS ordre_centre "
+            "FROM ecritures e LEFT JOIN centres c ON c.code_centre = e.centre "
+            "WHERE e.id_piece = ANY(%s) "
+            "GROUP BY e.id_piece, e.journal, e.date_piece, e.statut, e.centre "
+            "ORDER BY e.date_piece, ordre_centre, e.centre, premiere_saisie, e.id_piece",
             (ids,))
-        toutes = cur.fetchall()
+        toutes = [(i, j, d, s, reserve) for i, j, d, s, _, reserve, _ in cur.fetchall()]
         if not toutes:
             raise ValueError("Aucune piece a valider.")
-        # Ordre de saisie (premiere_saisie), et non l'ordre - non garanti par
-        # Postgres pour un GROUP BY sans ORDER BY - dans lequel les lignes
-        # ressortaient sinon. Corrige le 23/09/2026 : un lot valide d'un
-        # coup doit distribuer ses numeros dans l'ordre ou les pieces ont
-        # ete saisies, la premiere saisie recevant le premier numero -
-        # avant ce correctif, l'ordre de distribution etait entierement
-        # imprevisible (ni l'ordre de saisie, ni l'ordre de selection a
-        # l'ecran n'etaient respectes). Une validation piece par piece n'est
-        # pas concernee : une seule ligne a trier n'a rien a trier.
         en_attente = set()
         if not autoriser_attente:
             cur.execute(
@@ -990,7 +1007,7 @@ def valider_pieces(ids, utilisateur, autoriser_attente=False):
                 "UNION SELECT DISTINCT id_piece FROM ecritures WHERE id_piece = ANY(%s) AND compte = %s",
                 (ids, md.COMPTE_ATTENTE, ids, md.COMPTE_ATTENTE))
             en_attente = {r[0] for r in cur.fetchall()}
-        pieces = [(i, j, d) for i, j, d, s, _ in toutes if s == "saisie" and i not in en_attente]
+        pieces = [(i, j, d, r) for i, j, d, s, r in toutes if s == "saisie" and i not in en_attente]
         ignorees = {}
         for i, _, _, s, _ in toutes:
             if s != "saisie":
@@ -1003,13 +1020,26 @@ def valider_pieces(ids, utilisateur, autoriser_attente=False):
                 if k == "compte_attente" else f"{len(v)} au statut '{k}'"
                 for k, v in sorted(ignorees.items()))
             raise ValueError(f"Aucune piece a valider ({detail}).")
+        # Prefixes lus une fois, sur la transaction en cours (avant : tout le
+        # referentiel relu pour chaque piece, sur une seconde connexion).
+        cur.execute("SELECT journal, prefixe_piece FROM journaux")
+        prefixes = {j: (str(p or "").strip() or j) for j, p in cur.fetchall()}
         validees = []
-        for idp, journal, date_piece in pieces:
+        for idp, journal, date_piece, reserve in pieces:
             mois = mois_de(date_piece)
-            n = _prochain_numero(cur, f"def:{journal}:{mois}")
-            num_def = f"{prefixe_piece(journal)}{mois[2:6]}{n:03d}"
+            debut = f"{prefixes.get(journal, journal)}{mois[2:6]}"
+            # Piece renvoyee puis revalidee : elle reprend son numero, s'il
+            # appartient toujours au meme journal et au meme mois.
+            if reserve and reserve.startswith(debut) and reserve[len(debut):].isdigit():
+                num_def = reserve
+            else:
+                if reserve:
+                    logger.warning("Numero %s abandonne par la piece %s (journal ou mois modifie).",
+                                   reserve, idp)
+                n = _prochain_numero(cur, f"def:{journal}:{mois}")
+                num_def = f"{debut}{n:03d}"
             cur.execute(
-                "UPDATE ecritures SET num_definitif = %s, statut = 'validee', "
+                "UPDATE ecritures SET num_definitif = %s, num_reserve = '', statut = 'validee', "
                 "valide_par = %s, valide_le = now() WHERE id_piece = %s",
                 (num_def, utilisateur, idp))
             validees.append(idp)
@@ -1050,8 +1080,11 @@ def rejeter_pieces(ids, motif, utilisateur):
                 "Une piece deja exportee vers Sage ne peut plus etre renvoyee pour "
                 "correction : elle est deja dans le livre officiel. Corriger par une "
                 "ecriture d'extourne.")
+        # 25/09/2026 : le numero definitif d'une piece validee est mis de cote
+        # (num_reserve) et lui sera rendu a la revalidation - plus de trou.
         cur.execute(
             "UPDATE ecritures SET statut = 'a_corriger', observation = %s, "
+            "num_reserve = CASE WHEN num_definitif <> '' THEN num_definitif ELSE num_reserve END, "
             "num_definitif = '', valide_par = '', valide_le = NULL "
             "WHERE id_piece = ANY(%s)",
             (f"{utilisateur} : {motif}", ids))

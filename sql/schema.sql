@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS centres (
     code_centre          text PRIMARY KEY,
     intitule              text NOT NULL,
     section_analytique    text NOT NULL,
+    -- Ordre de numerotation a une meme date (voir valider_pieces et la
+    -- migration 2026-09-25_numerotation_date_centre.sql).
+    ordre                 integer NOT NULL DEFAULT 99,
     actif                 text NOT NULL DEFAULT 'oui' CHECK (actif IN ('oui', 'non')),
     updated_at            timestamptz NOT NULL DEFAULT now()
 );
@@ -131,6 +134,9 @@ CREATE TABLE IF NOT EXISTS ecritures (
     id_lien              text NOT NULL DEFAULT '',
     num_provisoire        text NOT NULL DEFAULT '',
     num_definitif         text NOT NULL DEFAULT '',
+    -- Numero definitif garde par une piece renvoyee pour correction, rendu a
+    -- la revalidation (voir rejeter_pieces / valider_pieces).
+    num_reserve           text NOT NULL DEFAULT '',
     journal               text NOT NULL REFERENCES journaux(journal),
     centre                text NOT NULL REFERENCES centres(code_centre),
     date_piece            date NOT NULL,
@@ -212,6 +218,26 @@ CREATE CONSTRAINT TRIGGER trg_equilibre_piece
     AFTER INSERT OR UPDATE OR DELETE ON ecritures
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION verifier_equilibre_piece();
+
+-- Deux pieces d'un meme journal ne portent jamais le meme numero definitif.
+CREATE OR REPLACE FUNCTION verifier_numero_unique() RETURNS trigger AS $$
+BEGIN
+    IF NEW.num_definitif <> '' AND EXISTS (
+        SELECT 1 FROM ecritures
+        WHERE journal = NEW.journal AND num_definitif = NEW.num_definitif
+          AND id_piece <> NEW.id_piece) THEN
+        RAISE EXCEPTION 'Numero de piece % deja attribue dans le journal %',
+            NEW.num_definitif, NEW.journal;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_numero_unique ON ecritures;
+CREATE CONSTRAINT TRIGGER trg_numero_unique
+    AFTER INSERT OR UPDATE OF num_definitif, journal ON ecritures
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION verifier_numero_unique();
 
 -- Compteurs de numerotation. Remplace le verrou de repertoire de la version
 -- Excel : ici, l'atomicite vient d'un UPSERT (INSERT ... ON CONFLICT DO
