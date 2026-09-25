@@ -302,15 +302,31 @@ def mois_du_libelle(libelle, date_piece):
     juin 2026 (avance)."""
     import unicodedata
     t = unicodedata.normalize("NFKD", str(libelle or "")).encode("ascii", "ignore").decode().upper()
-    trouves = []
-    for mot in re.split(r"[^A-Z]+", t):
-        if not mot:
-            continue
+    mots = [mot for mot in re.split(r"[^A-Z]+", t) if mot]
+    lus = []
+    for mot in mots:
         m = _MOIS_EXACTS.get(mot)
         if m is None:
             m = next((v for k, v in _MOIS_LONGS.items() if mot.startswith(k)), None)
         if m is None and mot.startswith("MARS") and len(mot) > 4 and mot[4:] in ("SOLDE", "AVANCE"):
             m = 3
+        lus.append(m)
+    trouves = []
+    for i, m in enumerate(lus):
+        # Plage "OCT A DEC" : forme ecrite par les encaissements du 18 au
+        # 25/09/2026 pour trois mois consecutifs ou plus. Les mois du milieu
+        # n'y sont pas cites mais sont bien couverts : sans cette lecture,
+        # novembre etait oublie et son produit reparti sur octobre et
+        # decembre. Ne s'applique qu'entre deux mois et dans l'ordre de
+        # l'annee scolaire (septembre -> aout), jamais sur un "A" isole.
+        if (m is None and mots[i] == "A" and 0 < i < len(lus) - 1
+                and lus[i - 1] and lus[i + 1]):
+            ordre = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8]
+            debut, fin = ordre.index(lus[i - 1]), ordre.index(lus[i + 1])
+            for milieu in ordre[debut + 1:fin] if debut < fin else []:
+                if milieu not in trouves:
+                    trouves.append(milieu)
+            continue
         if m and m not in trouves:
             trouves.append(m)
     if not trouves:

@@ -585,6 +585,23 @@ def server(input, output, session):
                 {"class": "carte"},
                 carte_bandeau("shield-check", "Pièces en attente"),
                 barre,
+                # Tout choisir d'un coup (25/09/2026), au lieu de Ctrl+clic
+                # ligne par ligne. Ne choisit que les pieces AFFICHEES
+                # (filtre Centre et filtres de colonnes compris), et ne
+                # valide rien : la validation reste le bouton "Valider les
+                # pieces choisies", avec tous ses controles. Voir
+                # _tout_selectionner().
+                ui.div(
+                    {"class": "barre-selection"},
+                    ui.input_action_link("v_tout_selectionner",
+                                          ui.TagList(ui.tags.i({"class": "bi bi-check2-square"}),
+                                                     "Tout sélectionner"),
+                                          class_="lien-selection"),
+                    ui.input_action_link("v_tout_deselectionner",
+                                          ui.TagList(ui.tags.i({"class": "bi bi-square"}),
+                                                     "Tout désélectionner"),
+                                          class_="lien-selection"),
+                ),
                 ui.output_data_frame("v_table"), ui.br(),
                 # Le motif est place au-dessus des boutons (pas a cote) :
                 # il concerne uniquement le renvoi, mais reste toujours
@@ -1155,12 +1172,16 @@ def server(input, output, session):
         correction.set(None)
         dernier_msg.set(None)
 
-    # ---------------- formulaire "encaissement" : lignes de repartition ------
+    # ---------------- formulaires a repartition par mois ---------------------
     #
     # Un reglement peut couvrir plusieurs mois (frais du mois, avance, ou
-    # rattrapage d'un mois passe) : le champ "repartition" du modele
-    # "encaissement" (cf. logic.modeles) n'est pas un widget simple mais un
-    # petit tableau dont le nombre de lignes varie. Chaque ligne a un
+    # rattrapage d'un mois passe) : le champ "repartition" des modeles
+    # "encaissement", "fournisseur" et "fournisseur_banque" (cf.
+    # logic.modeles - les deux derniers depuis le 25/09/2026) n'est pas un
+    # widget simple mais un petit tableau dont le nombre de lignes varie.
+    # Les natures proposees viennent du modele (cle "natures" du champ) :
+    # Frais / Avance / Solde pour un eleve, Paiement / Avance / Solde pour un
+    # fournisseur. Chaque ligne a un
     # identifiant stable qui ne change jamais tant qu'elle existe
     # (m_rep_mois_<id>, m_rep_nature_<id>, m_rep_montant_<id>) : la premiere
     # ligne porte toujours l'identifiant 1 et ne peut pas etre retiree, les
@@ -1179,6 +1200,38 @@ def server(input, output, session):
     # reinitialiser() en particulier accumulait deux effets orphelins a
     # chaque enregistrement de piece).
     rep_effets_crees = {}
+    # Valeurs de depart d'une ligne, quand elle en a (correction d'une piece
+    # existante : les lignes d'origine sont reprises telles quelles). Vide
+    # sinon. Remis a zero a chaque nouveau tableau (_repartir_a_neuf).
+    rep_prefill = {}
+    # Nature avec laquelle chaque ligne a ete dessinee ou mise a jour pour la
+    # derniere fois : _maj_mois_suggere ne propose un mois que si la nature a
+    # REELLEMENT change. Sans ce repere, la premiere valeur que le navigateur
+    # renvoie pour une ligne neuve declenchait la suggestion, et ecrasait les
+    # mois repris d'une piece en correction.
+    rep_nature_vue = {}
+
+    def _champ_repartition(m):
+        """Le champ "repartition" d'un modele, ou None s'il n'en a pas."""
+        if m is None:
+            return None
+        return next((ch for ch in (m.get("champs") or []) if ch["t"] == "repartition"), None)
+
+    def _repartition_affichee():
+        """Champ "repartition" du modele affiche dans Saisie, ou None."""
+        return _champ_repartition(md.modele_par_id(input.m_modele()))
+
+    def _natures_repartition():
+        ch = _repartition_affichee()
+        return (ch or {}).get("natures") or md.NATURES_ENCAISSEMENT
+
+    def _nature_valide(nature, natures):
+        return nature if nature in natures else next(iter(natures))
+
+    def _champ_tiers_affiche():
+        """Premier champ tiers du modele affiche (eleve 411, fournisseur 401)."""
+        m = md.modele_par_id(input.m_modele())
+        return next((ch for ch in ((m or {}).get("champs") or []) if ch["t"] == "tiers"), None)
 
     def _detruire_effets_repartition(rid):
         for ef in rep_effets_crees.pop(rid, []):
@@ -1187,16 +1240,17 @@ def server(input, output, session):
             except Exception:
                 pass
 
-    # Suggestion de mois selon la nature choisie (spec §4) : "Frais" propose
-    # le mois calendaire en cours, "Avance" le mois suivant le dernier
-    # mouvement connu du tiers sur son compte 411 (ou le mois en cours si
-    # aucun historique), "Solde" ne propose rien - deviner un mauvais mois
-    # de rattrapage serait pire que ne rien suggerer. Toujours modifiable
-    # ensuite a la main : une suggestion de confort, jamais une validation
-    # automatique.
-    def _mois_suggere(nature, code_tiers):
+    # Suggestion de mois selon la nature choisie (spec §4) : "Frais" (eleve)
+    # ou "Paiement" (fournisseur) propose le mois calendaire en cours,
+    # "Avance" le mois suivant le dernier mouvement connu du tiers sur son
+    # compte collectif - 411000 pour un eleve, 401000 pour un fournisseur -
+    # (ou le mois en cours si aucun historique), "Solde" ne propose rien -
+    # deviner un mauvais mois de rattrapage serait pire que ne rien suggerer.
+    # Toujours modifiable ensuite a la main : une suggestion de confort,
+    # jamais une validation automatique.
+    def _mois_suggere(nature, code_tiers, compte="411000"):
         if nature == "avance" and code_tiers:
-            hist = dl.dernieres_lignes_tiers(code_tiers, limite=1)
+            hist = dl.dernieres_lignes_tiers(code_tiers, limite=1, compte=compte)
             if len(hist):
                 dernier = md.mois_depuis_libelle(hist.iloc[0]["libelle"])
                 if dernier:
@@ -1205,11 +1259,21 @@ def server(input, output, session):
             return ""
         return md.MOIS_FR[date.today().month - 1]
 
-    def _code_tiers_saisi():
-        brut = get_input("ch_tiers")
+    # Code du tiers choisi dans le formulaire affiche, et son compte
+    # collectif : ("411XXX", "411000") pour un eleve, ("401XXX", "401000")
+    # pour un fournisseur. ("", "411000") si aucun tiers n'est encore choisi.
+    def _tiers_saisi():
+        ch = _champ_tiers_affiche()
+        if ch is None:
+            return "", "411000"
+        brut = get_input(f"ch_{ch['n']}")
         if not brut:
-            return ""
-        return dl.code_tiers_candidat(brut, "411", ref())
+            return "", ch.get("collectif", "411000")
+        return dl.code_tiers_candidat(brut, ch["pref"], ref()), ch.get("collectif", "411000")
+
+    def _mois_suggere_affiche(nature):
+        code, compte = _tiers_saisi()
+        return _mois_suggere(nature, code, compte)
 
     # Lit les lignes actuellement affichees (une par mois reparti) pour en
     # faire la valeur du champ "repartition" - le rendu generique de
@@ -1218,10 +1282,14 @@ def server(input, output, session):
     # couvrir plusieurs mois sur une seule ecriture. Le selectize multiple
     # renvoie un tuple ; md.mois_tries() cote modeles accepte aussi l'ancienne
     # forme (une chaine), pour les pieces deja enregistrees.
+    # La nature est ramenee a une nature du modele affiche : une valeur
+    # restee d'un autre formulaire ("frais" sur un reglement fournisseur) ne
+    # doit jamais atteindre le libelle.
     def _lire_repartition():
+        natures = _natures_repartition()
         return [
             {"mois": list(get_input(f"m_rep_mois_{rid}", []) or []),
-             "nature": get_input(f"m_rep_nature_{rid}", "frais"),
+             "nature": _nature_valide(get_input(f"m_rep_nature_{rid}", None), natures),
              "montant": get_input(f"m_rep_montant_{rid}", 0)}
             for rid in rep_ids()
         ]
@@ -1238,10 +1306,13 @@ def server(input, output, session):
         @reactive.effect
         @reactive.event(input[f"m_rep_nature_{rid}"])
         def _maj_mois_suggere():
-            if req(input.m_modele()) != "encaissement":
+            if _repartition_affichee() is None:
                 return
-            nature = get_input(f"m_rep_nature_{rid}", "frais")
-            propose = _mois_suggere(nature, _code_tiers_saisi())
+            nature = get_input(f"m_rep_nature_{rid}", None)
+            if nature is None or rep_nature_vue.get(rid) == nature:
+                return
+            rep_nature_vue[rid] = nature
+            propose = _mois_suggere_affiche(nature)
             ui.update_selectize(f"m_rep_mois_{rid}", selected=[propose] if propose else [])
 
         effets.append(_maj_mois_suggere)
@@ -1251,6 +1322,8 @@ def server(input, output, session):
             @reactive.event(input[f"m_rep_suppr_{rid}"])
             def _retirer_ligne():
                 _detruire_effets_repartition(rid)
+                rep_prefill.pop(rid, None)
+                rep_nature_vue.pop(rid, None)
                 rep_ids.set([x for x in rep_ids() if x != rid])
 
             effets.append(_retirer_ligne)
@@ -1262,7 +1335,7 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.m_rep_ajouter)
     def _ajouter_ligne_repartition():
-        if req(input.m_modele()) != "encaissement":
+        if _repartition_affichee() is None:
             return
         ids = rep_ids()
         if len(ids) >= MAX_LIGNES_REPARTITION:
@@ -1288,20 +1361,35 @@ def server(input, output, session):
         # reconstruit plus que pour une vraie raison structurelle (ajout/
         # suppression de ligne, changement de modele), jamais parce qu'une
         # valeur a change dans une ligne existante.
+        #
+        # Valeurs de depart, par ordre de priorite : ce que le navigateur a
+        # deja pour cette ligne (elle existait avant ce rendu), puis les
+        # valeurs d'origine d'une piece en correction (rep_prefill), puis les
+        # defauts du modele (premiere nature, mois suggere, montant nul).
         with reactive.isolate():
-            nature_val = get_input(f"m_rep_nature_{rid}", "frais")
+            natures = _natures_repartition()
+            depart = rep_prefill.get(rid) or {}
+            nature_val = get_input(f"m_rep_nature_{rid}", None)
             mois_defaut = get_input(f"m_rep_mois_{rid}", None)
-            montant_val = get_input(f"m_rep_montant_{rid}", 0)
-            # _code_tiers_saisi() lit aussi ch_tiers et ref() sans isolate() -
-            # reste dans le meme bloc isole, sinon choisir un eleve
-            # reconstruirait le tableau de repartition en entier pour la
-            # meme raison que ci-dessus.
+            montant_val = get_input(f"m_rep_montant_{rid}", None)
+            if nature_val is None:
+                nature_val = depart.get("nature")
+            nature_val = _nature_valide(nature_val, natures)
+            if montant_val is None:
+                montant_val = depart.get("montant", 0)
+            # _mois_suggere_affiche() lit aussi le champ tiers et ref() sans
+            # isolate() - reste dans le meme bloc isole, sinon choisir un
+            # eleve reconstruirait le tableau de repartition en entier pour
+            # la meme raison que ci-dessus.
             # Selection multiple : la valeur est une liste, jamais une chaine.
-            if mois_defaut is None:
-                propose = _mois_suggere(nature_val, _code_tiers_saisi())
-                mois_defaut = [propose] if propose else []
-            else:
+            if mois_defaut is not None:
                 mois_defaut = list(mois_defaut)
+            elif "mois" in depart:
+                mois_defaut = md.mois_tries(depart.get("mois"))
+            else:
+                propose = _mois_suggere_affiche(nature_val)
+                mois_defaut = [propose] if propose else []
+            rep_nature_vue[rid] = nature_val
         suppr = ui.tags.td() if premiere else ui.tags.td(
             ui.input_action_link(f"m_rep_suppr_{rid}", "Retirer", class_="lien-etendre"))
         return ui.tags.tr(
@@ -1315,9 +1403,7 @@ def server(input, output, session):
                 selected=mois_defaut, multiple=True,
                 options={"placeholder": "Mois..."})),
             ui.tags.td(ui.input_select(f"m_rep_nature_{rid}", None,
-                                        choices={"frais": "Frais", "avance": "Avance",
-                                                 "solde": "Solde / Retard"},
-                                        selected=nature_val)),
+                                        choices=dict(natures), selected=nature_val)),
             # update_on="blur" (10/09/2026, ter) : par defaut Shiny renvoie la
             # valeur au serveur a chaque frappe, ce qui reconstruisait tout le
             # panneau "Ecriture generee" (m_apercu/m_ruban, cf. plus bas) a
@@ -1333,7 +1419,7 @@ def server(input, output, session):
 
     @render.ui
     def m_bloc_repartition():
-        if req(input.m_modele()) != "encaissement":
+        if _repartition_affichee() is None:
             return None
         ids = rep_ids()
         table = ui.tags.table(
@@ -1351,7 +1437,114 @@ def server(input, output, session):
             pied = ui.div({"class": "ruban att", "style": "font-size:12px"},
                            "Six mois par piece au maximum : au-dela, traiter la creance ancienne "
                            "separement plutot que de tout regrouper ici.")
-        return ui.div(table, pied)
+        return ui.div(table, ui.output_ui("m_rep_reste"), pied)
+
+    # Ce qui reste a repartir (25/09/2026). Sans ce rappel, une repartition
+    # qui ne tombe pas juste ne se voyait qu'au ruban "L'operation n'est pas
+    # equilibree", sans dire de combien ni pourquoi. Sortie SEPAREE du
+    # tableau : elle suit les montants tapes sans jamais reconstruire les
+    # lignes (voir _ligne_repartition_ui). N'affiche rien quand tout est
+    # juste.
+    @render.ui
+    def m_rep_reste():
+        if _repartition_affichee() is None:
+            return None
+        try:
+            total = float(get_input("ch_montant", 0) or 0)
+        except (TypeError, ValueError):
+            total = 0.0
+        reparti = 0.0
+        sans_mois = False
+        for row in _lire_repartition():
+            try:
+                montant = float(row["montant"] or 0)
+            except (TypeError, ValueError):
+                montant = 0.0
+            if montant > 0:
+                reparti += montant
+                if not md.mois_tries(row["mois"]):
+                    sans_mois = True
+        if total <= 0 and reparti <= 0:
+            return None
+        style = {"class": "ruban att", "style": "font-size:12px;margin-top:6px"}
+        if sans_mois:
+            return ui.div(style, "Choisissez le mois de chaque ligne : une ligne sans mois "
+                                 "n'est pas prise en compte.")
+        ecart = round(total - reparti)
+        if ecart > 0:
+            return ui.div(style, f"Réparti : {dl.fcfa(reparti)} F sur {dl.fcfa(total)} F — "
+                                 f"reste {dl.fcfa(ecart)} F à répartir.")
+        if ecart < 0:
+            return ui.div(style, f"Réparti : {dl.fcfa(reparti)} F, soit {dl.fcfa(-ecart)} F de plus "
+                                 f"que le montant ({dl.fcfa(total)} F).")
+        return None
+
+    # Repart sur un tableau neuf : une ligne vierge, ou les lignes donnees
+    # (correction). Identifiants toujours neufs, jamais reutilises (voir
+    # reinitialiser()) : sur un identifiant neuf, get_input() ne trouve rien
+    # et _ligne_repartition_ui() prend rep_prefill ou les defauts.
+    def _repartir_a_neuf(lignes=None):
+        for rid_ancien in rep_ids():
+            _detruire_effets_repartition(rid_ancien)
+        rep_prefill.clear()
+        rep_nature_vue.clear()
+        nouveaux = []
+        for row in (lignes or [None])[:MAX_LIGNES_REPARTITION]:
+            nouveau = rep_prochain_id()
+            rep_prochain_id.set(nouveau + 1)
+            if row is not None:
+                rep_prefill[nouveau] = row
+            _fabrique_effets_repartition(nouveau)
+            nouveaux.append(nouveau)
+        rep_ids.set(nouveaux)
+
+    # Lignes de repartition d'une piece enregistree (valeurs_json), pour la
+    # correction. Une piece anterieure a la repartition (reglement
+    # fournisseur d'avant le 25/09/2026) n'en a pas : elle revient sur une
+    # seule ligne avec son montant, mois a choisir - on ne le devine pas.
+    # Renvoie (lignes, reprise_complete).
+    def _repartition_depuis_valeurs(vals, ch):
+        natures = ch.get("natures") or md.NATURES_ENCAISSEMENT
+        lignes = []
+        for row in vals.get(ch["n"]) or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                montant = float(md.un(row.get("montant"), 0) or 0)
+            except (TypeError, ValueError):
+                montant = 0.0
+            lignes.append({"mois": md.mois_tries(row.get("mois")),
+                           "nature": _nature_valide(row.get("nature"), natures),
+                           "montant": montant})
+        if lignes:
+            return lignes, True
+        try:
+            montant = float(md.un(vals.get("montant"), 0) or 0)
+        except (TypeError, ValueError):
+            montant = 0.0
+        return [{"mois": [], "nature": next(iter(natures)), "montant": montant}], False
+
+    # Un tableau neuf a chaque changement de formulaire, et les lignes
+    # d'origine quand une correction s'ouvre. Avant le 25/09/2026, les
+    # lignes d'un encaissement restaient affichees d'un modele a l'autre, et
+    # une correction repartait sur une ligne vierge : la repartition
+    # d'origine etait a ressaisir en entier.
+    @reactive.effect
+    @reactive.event(input.m_modele, correction)
+    def _repartition_selon_modele():
+        ch = _repartition_affichee()
+        if ch is None:
+            return
+        cor = correction()
+        if cor and cor["modele"] == input.m_modele() and cor.get("valeurs"):
+            lignes, complete = _repartition_depuis_valeurs(cor["valeurs"], ch)
+            _repartir_a_neuf(lignes)
+            if not complete:
+                ui.notification_show(
+                    "Pièce enregistrée avant la répartition par mois : choisissez le ou les mois "
+                    "concernés avant d'enregistrer.", type="warning", duration=8)
+            return
+        _repartir_a_neuf()
 
     # Bloc historique (spec §3.2) : un resume compact toujours visible des
     # qu'un tiers est choisi, jamais calcule a partir d'un tarif ou d'un
@@ -1941,12 +2134,7 @@ def server(input, output, session):
         # sur les valeurs par defaut. Cela evite la course entre ui.update_numeric()
         # (message asynchrone vers le client) et le re-rendu de m_bloc_repartition,
         # qui relirait sinon l'ancien montant cote serveur et le reafficherait.
-        for rid_ancien in rep_ids():
-            _detruire_effets_repartition(rid_ancien)
-        nouveau = rep_prochain_id()
-        rep_prochain_id.set(nouveau + 1)
-        _fabrique_effets_repartition(nouveau)
-        rep_ids.set([nouveau])
+        _repartir_a_neuf()
 
     @reactive.effect
     @reactive.event(input.m_vider)
@@ -2278,9 +2466,53 @@ def server(input, output, session):
             return None
         n = 0 if "Message" in getattr(sel, "columns", []) else len(sel)
         if n == 0:
-            return ("Aucune pièce choisie — Ctrl+clic pour en choisir plusieurs, "
-                    "Maj+clic pour une plage.")
+            return ("Aucune pièce choisie — « Tout sélectionner », ou Ctrl+clic pour en "
+                    "choisir plusieurs, Maj+clic pour une plage.")
         return f"{n} pièce choisie." if n == 1 else f"{n} pièces choisies."
+
+    # "Tout selectionner" / "Tout deselectionner" (25/09/2026). Ne touche que
+    # la SELECTION de la grille, jamais la base : une piece choisie ainsi
+    # passe ensuite par _valider() exactement comme une piece cliquee a la
+    # main (role, centre, jumelle, anomalies bloquantes, statut).
+    #
+    # Seules les lignes visibles sont choisies : data_view_rows() tient
+    # compte des filtres de colonnes et du tri. Choisir aussi les lignes
+    # masquees par un filtre ferait valider des pieces que la validatrice
+    # n'a pas sous les yeux. Si le navigateur n'a pas encore transmis la
+    # vue, on retombe sur toutes les lignes de la grille - c'est alors la
+    # meme chose, aucun filtre n'ayant pu etre pose.
+    @reactive.effect
+    @reactive.event(input.v_tout_selectionner)
+    async def _tout_selectionner():
+        if not est_validateur():
+            ui.notification_show("Action réservée à la validation.", type="error")
+            return
+        try:
+            grille = v_table.data()
+        except Exception:
+            return
+        if len(grille) == 0 or "Message" in grille.columns:
+            ui.notification_show("Aucune pièce en attente.", type="warning")
+            return
+        try:
+            lignes = list(v_table.data_view_rows())
+        except Exception:
+            lignes = list(range(len(grille)))
+        if not lignes:
+            ui.notification_show("Aucune pièce affichée avec ces filtres.", type="warning")
+            return
+        await v_table.update_cell_selection({"type": "row", "rows": lignes})
+
+    @reactive.effect
+    @reactive.event(input.v_tout_deselectionner)
+    async def _tout_deselectionner():
+        try:
+            grille = v_table.data()
+        except Exception:
+            return
+        if len(grille) == 0 or "Message" in grille.columns:
+            return
+        await v_table.update_cell_selection(None)
 
     # Pourquoi une piece selectionnee n'a pas pu etre validee. Le texte doit
     # dire au validateur ce qu'il lui reste a faire, pas seulement nommer un

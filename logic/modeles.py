@@ -12,7 +12,9 @@
 #                      "mois", "oui_non", "choix", "repartition" (pas un
 #                      widget simple : plusieurs lignes mois/nature/montant
 #                      construites dynamiquement par l'interface, cf.
-#                      "encaissement" et app.py/m_bloc_repartition)
+#                      "encaissement", "fournisseur", "fournisseur_banque"
+#                      et app.py/m_bloc_repartition ; la cle "natures" du
+#                      champ donne les natures proposees)
 #
 # Port Python (depuis R/modeles.R) : 13 modeles, memes comptes, meme
 # traduction debit/credit.
@@ -48,9 +50,8 @@ LIBELLE_MAX = 60
 # Mesure faite sur les 1280 eleves du plan tiers reel, toutes combinaisons de
 # mois confondues : avec "FRAIS DE COURS D'APPUI" et les mois en toutes
 # lettres, le nom etait tronque dans 76 % des cas courants ; en abregeant les
-# seuls mois, encore 40 %. Avec ces trois bases-ci, plus aucune troncature
-# jusqu'a trois mois - et la forme de plage (voir _mois_en_libelle) couvre le
-# reste.
+# seuls mois, encore 40 %. Avec ces trois bases-ci, un nom de 34 caracteres
+# passe en entier jusqu'a trois mois.
 #
 # "SOLDE" plutot que "RATTRAPAGE" : c'est le mot qu'emploie le comptable
 # quand un mois partiellement regle est enfin couvert en entier.
@@ -59,6 +60,25 @@ LIBELLES_NATURE_CA = {
     "avance": "AVANCE CA",
     "solde": "SOLDE CA",
 }
+
+# Meme mecanique pour le reglement d'un fournisseur (25/09/2026) : un
+# reglement peut couvrir plusieurs mois (vacations, loyer, gardiennage...),
+# payes au mois, d'avance, ou pour solder un mois deja entame. "PAIEMENT"
+# joue ici le role de "FRAIS" chez les eleves - c'est le mot du comptable
+# pour ces pieces ("PAIEMENT VACATION DECEMBRE"). Voir
+# _libelle_reglement_fournisseur.
+LIBELLES_NATURE_FOURNISSEUR = {
+    "paiement": "PAIEMENT",
+    "avance": "AVANCE",
+    "solde": "SOLDE",
+}
+
+# Choix proposes dans la colonne "Nature" du tableau de repartition, par
+# modele (cle -> texte affiche). La premiere cle est la nature par defaut
+# d'une ligne neuve. Lu par app.py via le champ "repartition" de chaque
+# modele (cle "natures").
+NATURES_ENCAISSEMENT = {"frais": "Frais", "avance": "Avance", "solde": "Solde / Retard"}
+NATURES_FOURNISSEUR = {"paiement": "Paiement", "avance": "Avance", "solde": "Solde"}
 
 # Ordre de l'annee academique (septembre -> aout). Un reglement qui couvre
 # novembre, decembre et janvier doit se lire dans cet ordre ; l'ordre
@@ -195,26 +215,24 @@ def mois_tries(mois):
 
 
 def _mois_en_libelle(liste):
-    """Les mois couverts par une ligne de reglement, en abrege.
+    """Les mois couverts par une ligne de reglement, en abrege, TOUS cites :
+    "OCT-NOV-DEC".
 
-    Plage ("SEP A FEV") des que trois mois ou plus se suivent dans l'annee
-    academique, liste ("OCT-NOV") sinon.
-
-    La plage ne concerne que 1,4 % des formes possibles, mais ce sont
-    exactement celles ou l'enumeration poussait le libelle au-dela de
-    LIBELLE_MAX et amputait le nom : "SEP-OCT-NOV-DEC-JAN-FEV" fait 23
-    caracteres, "SEP A FEV" en fait 9. Aucune ambiguite a craindre, elle ne
-    s'applique que si les mois se suivent reellement."""
-    rangs = [MOIS_ANNEE_ACADEMIQUE.index(m) for m in liste]
-    if len(liste) >= 3 and rangs == list(range(rangs[0], rangs[0] + len(liste))):
-        return f"{ABREVIATIONS_MOIS[liste[0]]} A {ABREVIATIONS_MOIS[liste[-1]]}"
+    Corrige le 25/09/2026 a la demande d'Afiya : la forme de plage
+    ("OCT A DEC"), en place depuis le 18/09, ne citait pas les mois du
+    milieu. Le comptable veut lire chaque mois coche dans le libelle. Le
+    prix a payer est connu et accepte : au-dela de trois mois, le nom du
+    tiers est plus souvent raccourci - jamais la nature ni les mois (voir
+    _libelle_frais_ca), et le code tiers de la ligne identifie toujours la
+    personne. Les pieces deja enregistrees gardent leur libelle : rien n'est
+    reecrit dans l'historique, et la relecture sait lire les deux formes."""
     return "-".join(ABREVIATIONS_MOIS[m] for m in liste)
 
 
 def _libelle_frais_ca(nature, mois, nom=""):
     """Libelle d'une ligne de reglement du formulaire "encaissement" :
 
-        FRAIS CA OCT A DEC - OUEDRAOGO ABDOUL AZIZ
+        FRAIS CA OCT-NOV-DEC - OUEDRAOGO ABDOUL AZIZ
 
     Une seule forme, toujours la meme. Garder le libelle long quand il tient
     et ne raccourcir qu'au besoin donnerait deux ecritures differentes pour
@@ -235,6 +253,38 @@ def _libelle_frais_ca(nature, mois, nom=""):
         return tete
     place = LIBELLE_MAX - len(tete) - 3          # la place prise par " - "
     return f"{tete} - {nom[:place]}" if place > 0 else tete
+
+
+def _libelle_reglement_fournisseur(nature, libelle, mois, nom=""):
+    """Libelle d'une ligne 401 du reglement d'un fournisseur :
+
+        AVANCE ETAT VACATION OCT-NOV-DEC - KABORE BERNARD
+
+    nature, libelle choisi par la caisse, mois coches, puis le nom. Quand il
+    faut couper pour tenir dans LIBELLE_MAX, l'ordre est fixe : le NOM cede
+    d'abord (le code tiers est sur la ligne), puis le libelle ; la nature et
+    les mois ne sont jamais coupes - rien d'autre ne dit de quelle operation
+    ni de quelle periode il s'agit. Meme regle que _libelle_frais_ca.
+
+    Deux precautions sur le libelle tape :
+      - " - " y est ramene a un espace : c'est le separateur du nom, et
+        mois_depuis_libelle() ne lit que ce qui le precede. Un libelle
+        "FACTURE ONEA - SAABA" cacherait sinon les mois qui le suivent ;
+      - s'il commence deja par la nature ("PAIEMENT VACATION"), elle n'est
+        pas repetee."""
+    base = LIBELLES_NATURE_FOURNISSEUR.get(nature, LIBELLES_NATURE_FOURNISSEUR["paiement"])
+    mois_txt = _mois_en_libelle(mois_tries(mois))
+    lib = " ".join(str(un(libelle, "")).upper().replace(" - ", " ").split())
+    if lib == base or lib.startswith(base + " "):
+        lib = lib[len(base):].strip()
+    fixe = len(base) + (len(mois_txt) + 1 if mois_txt else 0)
+    place_lib = LIBELLE_MAX - fixe - 1               # l'espace avant le libelle
+    lib = lib[:place_lib].rstrip() if place_lib > 0 else ""
+    tete = " ".join(x for x in (base, lib, mois_txt) if x)
+    nom = str(un(nom, "")).strip()
+    place = LIBELLE_MAX - len(tete) - 3              # la place prise par " - "
+    nom = nom[:place].rstrip() if place > 0 else ""
+    return f"{tete} - {nom}" if nom else tete
 
 
 def _df(*lignes_):
@@ -327,7 +377,8 @@ MODELES = [
             {"n": "tiers", "l": "Eleve (compte 411)", "t": "tiers", "pref": "411", "collectif": "411000",
              "historique": True},
             {"n": "montant", "l": "Montant total recu", "t": "montant"},
-            {"n": "repartition", "l": "Repartition", "t": "repartition"},
+            {"n": "repartition", "l": "Repartition", "t": "repartition",
+             "natures": NATURES_ENCAISSEMENT},
         ],
         # Libelle de la ligne de caisse (voir _lignes_encaissement) : pas de
         # mois ici, une seule ligne ne peut pas resumer plusieurs mois et
@@ -491,6 +542,12 @@ MODELES = [
     },
 
     {
+        # Repartition par mois (25/09/2026) : meme tableau que l'encaissement
+        # des frais de scolarite - mois (plusieurs possibles), nature
+        # (Paiement / Avance / Solde), montant. Une ligne du tableau = une
+        # ecriture 401 dont le libelle cite la nature et tous les mois (voir
+        # _lignes_fournisseur). La somme des lignes doit egaler le montant
+        # paye, sinon la piece n'est pas equilibree et ne s'enregistre pas.
         "id": "fournisseur",
         "titre": "Reglement d'un fournisseur",
         "aide": "Compte 401, timbre eventuel",
@@ -499,6 +556,8 @@ MODELES = [
             {"n": "tiers", "l": "Fournisseur (compte 401)", "t": "tiers", "pref": "401", "collectif": "401000"},
             {"n": "libelle", "l": "Libelle de l'operation", "t": "libelle"},
             {"n": "montant", "l": "Montant paye", "t": "montant"},
+            {"n": "repartition", "l": "Repartition", "t": "repartition",
+             "natures": NATURES_FOURNISSEUR},
             {"n": "timbre", "l": "Timbre (646200)", "t": "montant", "defaut": 0},
         ],
         "libelle": lambda v: v.get("libelle", ""),
@@ -541,6 +600,7 @@ MODELES = [
     # seul intitule/prefixe_piece changeraient si la banque change encore.
 
     {
+        # Meme repartition par mois que le reglement en caisse (25/09/2026).
         "id": "fournisseur_banque",
         "titre": "Reglement d'un fournisseur par banque",
         "aide": "Virement ou cheque - 52 % des pieces de banque",
@@ -549,12 +609,11 @@ MODELES = [
             {"n": "tiers", "l": "Fournisseur (compte 401)", "t": "tiers", "pref": "401", "collectif": "401000"},
             {"n": "libelle", "l": "Libelle de l'operation", "t": "libelle"},
             {"n": "montant", "l": "Montant paye", "t": "montant"},
+            {"n": "repartition", "l": "Repartition", "t": "repartition",
+             "natures": NATURES_FOURNISSEUR},
         ],
         "libelle": lambda v: v.get("libelle", ""),
-        "lignes": lambda v, cc: _df(
-            ligne("401000", v["lib"], debit=v["montant"], code_tiers=v.get("tiers", "")),
-            ligne(cc, v["lib"], credit=v["montant"]),
-        ),
+        "lignes": lambda v, cc: _lignes_fournisseur(v, cc),
     },
 
     {
@@ -825,11 +884,33 @@ def _lignes_avance_paiement(v, cc):
     return _df(ligne(cc, v["lib"], debit=montant_total), *lignes_mensuelles)
 
 
+# Reglement d'un fournisseur, en caisse ou par banque (25/09/2026) : une
+# ligne 401 au debit par ligne du tableau de repartition, chacune avec son
+# libelle "NATURE LIBELLE MOIS - NOM", puis le timbre eventuel (caisse
+# seulement, le modele banque n'a pas ce champ) et la tresorerie au credit
+# pour le total. Meme regle que _lignes_encaissement : une ligne sans mois
+# ou sans montant est ignoree, et si la somme des lignes ne fait pas le
+# montant paye, la piece n'est pas equilibree - operation_equilibree() la
+# refuse, rien n'est enregistre.
 def _lignes_fournisseur(v, cc):
-    L = _df(ligne("401000", v["lib"], debit=v["montant"], code_tiers=v.get("tiers", "")))
-    if v["timbre"] > 0:
-        L = pd.concat([L, _df(ligne("646200", f"TIMBR/{v['lib']}", debit=v["timbre"]))], ignore_index=True)
-    L = pd.concat([L, _df(ligne(cc, v["lib"], credit=v["montant"] + v["timbre"]))], ignore_index=True)
+    montant_total = float(un(v.get("montant"), 0) or 0)
+    if montant_total <= 0:
+        return None
+    repartition = [row for row in (v.get("repartition") or [])
+                   if float(un(row.get("montant"), 0) or 0) > 0 and mois_tries(row.get("mois"))]
+    lignes_401 = []
+    for row in repartition:
+        libelle = _libelle_reglement_fournisseur(row.get("nature"), v.get("libelle", ""),
+                                                 row.get("mois"), v.get("tiers_nom", ""))
+        lignes_401.append(ligne("401000", libelle, debit=float(un(row.get("montant"), 0) or 0),
+                                code_tiers=v.get("tiers", "")))
+    if not lignes_401:
+        return None
+    L = _df(*lignes_401)
+    timbre = float(un(v.get("timbre"), 0) or 0)
+    if timbre > 0:
+        L = pd.concat([L, _df(ligne("646200", f"TIMBR/{v['lib']}", debit=timbre))], ignore_index=True)
+    L = pd.concat([L, _df(ligne(cc, v["lib"], credit=montant_total + timbre))], ignore_index=True)
     return L
 
 

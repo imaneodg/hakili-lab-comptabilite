@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Libelles d'encaissement : nature abregee, mois abreges, nom de l'eleve
 #
-#     FRAIS CA OCT A DEC - OUEDRAOGO ABDOUL AZIZ
+#     FRAIS CA OCT-NOV-DEC - OUEDRAOGO ABDOUL AZIZ
 #
 # Trois regles sont testees ici, et elles se tiennent :
 #   - une ligne de repartition peut couvrir PLUSIEURS mois et ne produit
@@ -31,6 +31,12 @@ NATURES = ("frais", "avance", "solde")
 # l'export produit). C'est le pire cas reel, pas une valeur inventee.
 NOM_LE_PLUS_LONG = "TIENDREBEOGO BENI DE DIEU M KENNETH"
 NOM_COURANT = "OUEDRAOGO ABDOUL AZIZ"
+# Longueur de nom garantie entiere jusqu'a trois mois (decision du 18/09,
+# inchangee le 25/09) : 34 et non 35 a cause de JUIN et JUIL, seuls mois
+# abreges sur quatre lettres. Le seul nom de 35 caracteres du plan tiers
+# perd sa derniere lettre quand JUIN et JUILLET sont coches ensemble avec un
+# troisieme mois, et seulement la - le code tiers l'identifie toujours.
+NOM_GARANTI = NOM_LE_PLUS_LONG[:34]
 
 
 def _combinaisons():
@@ -65,29 +71,31 @@ def test_la_nature_et_les_mois_survivent_toujours():
 
 
 def test_aucune_troncature_jusqu_a_trois_mois():
-    """Mesure faite sur le plan tiers reel : jusqu'a trois mois, meme le nom
-    le plus long du referentiel passe en entier. C'est ce qui a decide du
-    choix de la forme courte."""
+    """Jusqu'a trois mois, un nom de 34 caracteres passe en entier, quelle que
+    soit la combinaison. C'est ce qui a decide du choix de la forme courte."""
     coupes = []
     for nature in NATURES:
         for n in range(1, 4):
             for combi in itertools.combinations(md.MOIS_FR, n):
-                lib = md._libelle_frais_ca(nature, combi, NOM_LE_PLUS_LONG)
-                if not lib.endswith(NOM_LE_PLUS_LONG):
+                lib = md._libelle_frais_ca(nature, combi, NOM_GARANTI)
+                if not lib.endswith(NOM_GARANTI):
                     coupes.append(lib)
     assert not coupes, f"Nom tronque alors qu'il ne devrait pas : {coupes[:5]}"
 
 
-def test_la_plage_remplace_l_enumeration_sur_les_mois_qui_se_suivent():
-    """"SEP A FEV" fait 9 caracteres la ou "SEP-OCT-NOV-DEC-JAN-FEV" en fait
-    23. C'est ce qui sauve les reglements longs."""
+def test_tous_les_mois_coches_sont_cites():
+    """25/09/2026 : chaque mois coche apparait dans le libelle, y compris
+    ceux du milieu. "OCT A DEC" ne citait pas novembre ; le comptable veut
+    lire "OCT-NOV-DEC"."""
     suite = ["SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE", "JANVIER", "FEVRIER"]
-    assert md._mois_en_libelle(md.mois_tries(suite)) == "SEP A FEV"
-    assert md._mois_en_libelle(md.mois_tries(["OCTOBRE", "NOVEMBRE", "DECEMBRE"])) == "OCT A DEC"
-    # Deux mois : pas de plage, une plage de deux termes n'apporte rien.
+    assert md._mois_en_libelle(md.mois_tries(suite)) == "SEP-OCT-NOV-DEC-JAN-FEV"
+    assert md._mois_en_libelle(md.mois_tries(["OCTOBRE", "NOVEMBRE", "DECEMBRE"])) == "OCT-NOV-DEC"
     assert md._mois_en_libelle(md.mois_tries(["OCTOBRE", "NOVEMBRE"])) == "OCT-NOV"
-    # Mois qui ne se suivent pas : enumeration, jamais de plage trompeuse.
     assert md._mois_en_libelle(md.mois_tries(["OCTOBRE", "DECEMBRE", "MARS"])) == "OCT-DEC-MAR"
+    for nature, combi in _combinaisons():
+        lib = md._libelle_frais_ca(nature, combi, NOM_LE_PLUS_LONG)
+        for m in combi:
+            assert md.ABREVIATIONS_MOIS[m] in lib.split(" - ")[0].split(" ")[-1].split("-"), lib
 
 
 def test_chaque_libelle_se_relit_sur_son_dernier_mois():
@@ -131,6 +139,8 @@ def test_les_anciens_libelles_restent_lisibles():
             ("RATTRAPAGE DE FRAIS DE COURS D'APPUI DE MAI - ZIDA GILDAS", "MAI"),
             ("REMUNERATION MARS/KABORE BERNARD", "MARS"),
             ("AVANCE BADOLO DRISSA/AOUT", "AOUT"),
+            # forme de plage, ecrite du 18 au 25/09/2026
+            ("FRAIS CA OCT A DEC - OUEDRAOGO ABDOUL AZIZ", "DECEMBRE"),
             ("VERSEMENT D'ESPECES EN BANQUE", None)]:
         assert md.mois_depuis_libelle(lib) == attendu, lib
 
@@ -167,7 +177,7 @@ def test_plusieurs_mois_sur_une_ligne_donnent_une_seule_ecriture():
                  "nature": "frais", "montant": 90000}], 90000)
     assert len(L) == 2
     assert L.iloc[1]["credit"] == 90000
-    assert L.iloc[1]["libelle"] == "FRAIS CA OCT A DEC - OUEDRAOGO AFIYA IMANE"
+    assert L.iloc[1]["libelle"] == "FRAIS CA OCT-NOV-DEC - OUEDRAOGO AFIYA IMANE"
     assert L["debit"].sum() == L["credit"].sum()
 
 

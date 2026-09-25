@@ -582,13 +582,17 @@ def resoudre_tiers(valeur, pref, collectif):
 # la caissiere y retrouve les derniers mouvements sans que le systeme ait
 # besoin de connaitre un tarif ou un statut - l'humain decide, le systeme
 # se contente d'afficher ce qu'il sait deja.
-def dernieres_lignes_tiers(code_tiers, limite=12):
+# Dernieres lignes d'un tiers sur son compte collectif : 411000 (eleve) par
+# defaut, 401000 pour un fournisseur (25/09/2026, suggestion du mois suivant
+# d'une avance dans le reglement fournisseur). Le compte est toujours passe
+# en parametre SQL, jamais concatene.
+def dernieres_lignes_tiers(code_tiers, limite=12, compte="411000"):
     if not code_tiers:
         return pd.DataFrame(columns=["date_piece", "libelle", "debit", "credit"])
     sql = ("SELECT date_piece, libelle, debit, credit FROM ecritures "
-           "WHERE compte = '411000' AND code_tiers = %s "
+           "WHERE compte = %s AND code_tiers = %s "
            "ORDER BY date_piece DESC, id_ligne DESC LIMIT %s")
-    return _lire_df(sql, params=(code_tiers, limite))
+    return _lire_df(sql, params=(compte, code_tiers, limite))
 
 
 def nouvelle_annee_academique():

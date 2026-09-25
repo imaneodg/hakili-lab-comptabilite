@@ -727,6 +727,13 @@ a.hk-btn-primaire, a.hk-btn-secondaire, a.hk-btn-danger { text-decoration:none; 
    "Afficher tout" ne fait rien d'autre que basculer une valeur reactive,
    c'est le rendu Python qui decide combien de lignes partent au navigateur. */
 .lien-etendre { display:block; margin-top:8px; font-size:12.5px; }
+/* "Tout selectionner / Tout deselectionner" de Validation (25/09/2026) :
+   de simples liens, jamais des boutons - ils ne font que choisir des
+   lignes, l'action reste "Valider les pieces choisies". */
+.barre-selection { display:flex; gap:18px; margin:0 0 8px 2px; }
+.lien-selection { color:var(--hk-primaire); font-size:12.5px; font-weight:600; text-decoration:none; }
+.lien-selection:hover { text-decoration:underline; }
+.lien-selection i { margin-right:5px; }
 
 /* Tableau de repartition (mois/nature/montant) du modele "Encaissement" :
    largeurs de colonnes fixes pour qu'il ne deborde jamais de sa carte,
