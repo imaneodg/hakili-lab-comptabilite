@@ -1,0 +1,112 @@
+/* ---------------------------------------------------------------------------
+   Tableau de bord (02/10/2026) - theme sombre, limite a la page (.tbx).
+   Les variables --hk-* de app.css sont redefinies ici : les champs de
+   l'application (dates, selectize) passent en sombre sans autre regle.
+   Contrastes verifies (texte sur carte #161D26) : #E8EDF2 14,4:1 ;
+   #8793A0 5,4:1 ; vert 7,4:1 ; rouge 6,2:1 ; ambre 7,8:1 ; bleu 6,3:1.
+   --------------------------------------------------------------------------- */
+
+@font-face { font-family:'Public Sans'; font-style:normal; font-weight:100 900; font-display:swap;
+  src:url('fonts/public-sans/public-sans-latin-wght-normal.woff2') format('woff2');
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,
+    U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family:'Public Sans'; font-style:normal; font-weight:100 900; font-display:swap;
+  src:url('fonts/public-sans/public-sans-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1D00-1DBF,
+    U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
+
+.tbx {
+  --tbx-fond:#0F1419; --tbx-carte:#161D26; --tbx-bordure:#2B3743;
+  --tbx-texte:#E8EDF2; --tbx-doux:#8793A0; --tbx-bleu:#5AA2EE;
+  --tbx-vert:#6BBE66; --tbx-ambre:#E0A640; --tbx-rouge:#F07A70;
+  --hk-fond:var(--tbx-fond); --hk-carte:var(--tbx-carte); --hk-bordure:var(--tbx-bordure);
+  --hk-bordure-forte:var(--tbx-bordure); --hk-texte:var(--tbx-texte); --hk-texte-doux:var(--tbx-doux);
+  --hk-neutre-clair:#1E2733; --hk-primaire:var(--tbx-bleu); --hk-primaire-clair:rgba(90,162,238,.25);
+  --hk-police:'Public Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  background:var(--tbx-fond); color:var(--tbx-texte); font-family:var(--hk-police);
+  position:relative; z-index:1;
+  border-radius:14px; padding:16px; display:flex; flex-direction:column; gap:14px;
+  font-variant-numeric:tabular-nums;
+}
+
+/* Filtres : une seule ligne compacte. */
+.tbx-filtres { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:flex-end; }
+.tbx-filtres .form-group, .tbx-filtres .shiny-input-container { margin:0; flex:0 1 auto; width:auto; }
+.tbx-filtres .selectize-control { margin:0; }
+.tbx-filtres .shiny-input-container { width:auto !important; }
+.tbx-filtres .shiny-date-range-input { min-width:270px; }
+.tbx-filtres .shiny-input-select, .tbx-filtres .selectize-control { min-width:240px; }
+.tbx-filtres label { color:var(--tbx-doux); font-size:12px; font-weight:500; margin-bottom:4px; }
+.tbx .form-control, .tbx .selectize-input, .tbx .selectize-dropdown { background:var(--tbx-carte);
+  color:var(--tbx-texte); }
+.tbx .selectize-input.items.has-items { height:auto; min-height:var(--hk-champ-hauteur); }
+.tbx .selectize-input > input { color:var(--tbx-texte); }
+.tbx .selectize-input .item { background:#1E2733; color:var(--tbx-texte); border-color:var(--tbx-bordure); }
+.tbx .selectize-dropdown .option { color:var(--tbx-texte); }
+
+/* Cartes. */
+.tbx-carte { background:var(--tbx-carte); border:1px solid var(--tbx-bordure); border-radius:12px;
+  padding:14px 16px; }
+.tbx-bandeaux { display:flex; flex-direction:column; gap:10px; }
+.tbx-bandeaux > .tbx-carte { display:grid; grid-template-columns:minmax(150px, 220px) 1fr;
+  align-items:center; column-gap:16px; }
+.tbx-carte--principale { border-color:var(--tbx-bleu); }
+.tbx-nom { font-size:13px; font-weight:600; color:var(--tbx-doux); text-transform:uppercase;
+  letter-spacing:.04em; }
+.tbx-carte--principale .tbx-nom { color:var(--tbx-texte); }
+.tbx-chiffres { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:16px; }
+.tbx-chiffre { min-width:0; }
+.tbx-libelle { font-size:12px; color:var(--tbx-doux); line-height:1.3; }
+.tbx-valeur { font-size:clamp(18px, 1.9vw, 24px); font-weight:650; line-height:1.2; white-space:nowrap;
+  color:var(--tbx-texte); margin-top:2px; }
+.tbx-unite { font-size:.55em; font-weight:500; color:var(--tbx-doux); }
+.tbx-detail { font-size:11.5px; color:var(--tbx-doux); margin-top:3px; }
+.tbx-positif { color:var(--tbx-vert); }
+.tbx-negatif { color:var(--tbx-rouge); }
+.tbx-attention { color:var(--tbx-ambre); }
+.tbx-notes { grid-column:2 / -1; margin-top:10px; padding-top:8px; border-top:1px solid var(--tbx-bordure);
+  font-size:12px; color:var(--tbx-doux); }
+
+.tbx-alerte { border:1px solid var(--tbx-ambre); color:var(--tbx-ambre); border-radius:10px;
+  padding:8px 12px; font-size:13px; }
+.tbx-alerte i { margin-right:6px; }
+.tbx-vide { color:var(--tbx-doux); text-align:center; padding:28px 16px; }
+.tbx-erreur { color:var(--tbx-ambre); border-color:var(--tbx-ambre); }
+
+/* Tableau : colonne des libelles fixe, defilement horizontal. */
+.tbx-titre { font-size:15px; font-weight:600; margin-bottom:10px; }
+.tbx-sous-titre { font-size:12px; font-weight:400; color:var(--tbx-doux); margin-left:8px; }
+.tbx-defile { overflow-x:auto; }
+.tbx-defile:focus-visible { outline:2px solid var(--tbx-bleu); outline-offset:2px; }
+.tbx-table { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }
+.tbx-table th, .tbx-table td { padding:7px 9px; white-space:nowrap; border-bottom:1px solid #1F2833; }
+.tbx-table td { text-align:right; }
+.tbx-table thead th { color:var(--tbx-doux); font-weight:500; text-align:right;
+  border-bottom:1px solid var(--tbx-bordure); }
+.tbx-table th[scope="row"], .tbx-table thead th:first-child { position:sticky; left:0; z-index:1;
+  background:var(--tbx-carte); text-align:left; font-weight:400; min-width:190px; }
+.tbx-table thead th:last-child, .tbx-table td:last-child { font-weight:600; border-left:1px solid var(--tbx-bordure); }
+.tbx-groupe th { position:sticky; left:0; text-align:left; color:var(--tbx-bleu); font-size:12px;
+  font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding-top:16px;
+  background:var(--tbx-carte); }
+.tbx-total th, .tbx-total td { font-weight:600; border-top:1px solid var(--tbx-bordure); }
+.tbx-total th[scope="row"] { font-weight:600; }
+.tbx-resultat th, .tbx-resultat td { font-weight:700; color:var(--tbx-texte);
+  border-top:1px solid var(--tbx-bordure); }
+.tbx-resultat th[scope="row"] { font-weight:700; }
+.tbx-pct th, .tbx-pct td { color:var(--tbx-doux); font-size:12px; }
+
+/* Telephone. */
+@media (max-width:600px) {
+  .tbx { padding:12px; border-radius:10px; }
+  .tbx-filtres > * , .tbx-filtres .shiny-date-range-input, .tbx-filtres .selectize-control { width:100% !important;
+    min-width:0; }
+  .tbx-bandeaux > .tbx-carte { grid-template-columns:1fr; row-gap:10px; padding:12px; }
+  .tbx-notes { grid-column:1; }
+  .tbx-chiffres { grid-template-columns:1fr; gap:6px; }
+  .tbx-chiffre { display:grid; grid-template-columns:1fr auto; align-items:baseline; column-gap:8px; }
+  .tbx-valeur { font-size:18px; margin:0; }
+  .tbx-detail { grid-column:1 / -1; margin-top:0; }
+  .tbx-filtres .input-daterange input.form-control { font-size:13px; padding:0 4px; }
+  .tbx-table th[scope="row"], .tbx-table thead th:first-child { min-width:140px; white-space:normal; }
+}

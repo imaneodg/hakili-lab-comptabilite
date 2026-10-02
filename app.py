@@ -59,6 +59,8 @@ import logic.modeles as md
 # ecrits dans www/graphiques.
 from assistant.session import SessionAssistant
 from composants import titre_page, carte_bandeau, hk_info, filtre, filtres, stat
+# Tableau de bord (02/10/2026) : module isole, voir tableau_bord.py.
+import tableau_bord
 
 # Message d'accueil de l'assistant : les six questions du tableau de bord en
 # pastilles cliquables (classe "suggestion" du composant de chat : un clic
@@ -380,6 +382,9 @@ def server(input, output, session):
     @reactive.calc
     def peut_voir_assistant():
         return est_comptable()
+
+    # Tableau de bord : reserve au comptable, verifie aussi cote serveur.
+    tableau_bord.serveur("tb", autorise=est_comptable, actualiser=lambda: (maj(), _disque()))
 
     # Lecture tolerante d'un input dynamique (ch_*, sold_*) : peut ne pas
     # encore exister cote client, comme un input$xxx NULL en R.
@@ -997,6 +1002,8 @@ def server(input, output, session):
         if u.get("role") == "validation":
             tabs += [onglet_validation(r), onglet_export(r)]
         tabs.append(onglet_controles())
+        if est_comptable():
+            tabs.append(tableau_bord.onglet("tb"))
         if peut_voir_assistant():
             tabs.append(onglet_assistant())
         tabs.append(onglet_referentiel(u, r))
