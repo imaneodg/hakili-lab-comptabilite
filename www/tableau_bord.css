@@ -1,11 +1,10 @@
 /* ---------------------------------------------------------------------------
-   Tableau de bord (02/10/2026) - theme sombre, limite a la page (.tbx).
-   Les variables --hk-* de app.css sont redefinies ici : les champs de
-   l'application (dates, selectize) passent en sombre sans autre regle.
-   Contrastes verifies (texte sur carte #161D26) : #E8EDF2 14,4:1 ;
-   #8793A0 5,4:1 ; vert 7,4:1 ; rouge 6,2:1 ; ambre 7,8:1 ; bleu 6,3:1.
+   Tableau de bord (02/10/2026) - aux couleurs de l'application (app.css).
+   Les couleurs viennent des variables --hk-* ; seuls le vert et le rouge
+   du signe sont fonces pour rester lisibles sur une carte blanche.
+   Contrastes sur blanc : texte 15,6:1 ; texte doux 5,4:1 ; vert 5,3:1 ;
+   rouge 5,5:1 ; ambre 4,7:1 ; bleu 5,5:1.
    --------------------------------------------------------------------------- */
-
 @font-face { font-family:'Public Sans'; font-style:normal; font-weight:100 900; font-display:swap;
   src:url('fonts/public-sans/public-sans-latin-wght-normal.woff2') format('woff2');
   unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,
@@ -16,17 +15,11 @@
     U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
 
 .tbx {
-  --tbx-fond:#0F1419; --tbx-carte:#161D26; --tbx-bordure:#2B3743;
-  --tbx-texte:#E8EDF2; --tbx-doux:#8793A0; --tbx-bleu:#5AA2EE;
-  --tbx-vert:#6BBE66; --tbx-ambre:#E0A640; --tbx-rouge:#F07A70;
-  --hk-fond:var(--tbx-fond); --hk-carte:var(--tbx-carte); --hk-bordure:var(--tbx-bordure);
-  --hk-bordure-forte:var(--tbx-bordure); --hk-texte:var(--tbx-texte); --hk-texte-doux:var(--tbx-doux);
-  --hk-neutre-clair:#1E2733; --hk-primaire:var(--tbx-bleu); --hk-primaire-clair:rgba(90,162,238,.25);
-  --hk-police:'Public Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
-  background:var(--tbx-fond); color:var(--tbx-texte); font-family:var(--hk-police);
-  position:relative; z-index:1;
-  border-radius:14px; padding:16px; display:flex; flex-direction:column; gap:14px;
-  font-variant-numeric:tabular-nums;
+  --tbx-carte:var(--hk-carte); --tbx-bordure:var(--hk-bordure);
+  --tbx-texte:var(--hk-texte); --tbx-doux:var(--hk-texte-doux); --tbx-bleu:var(--hk-primaire);
+  --tbx-vert:#237A46; --tbx-ambre:var(--hk-alerte); --tbx-rouge:#C92A2A;
+  color:var(--tbx-texte); font-family:'Public Sans', var(--hk-police);
+  display:flex; flex-direction:column; gap:14px; font-variant-numeric:tabular-nums;
 }
 
 /* Filtres : une seule ligne compacte. */
@@ -37,15 +30,10 @@
 .tbx-filtres .shiny-date-range-input { min-width:270px; }
 .tbx-filtres .shiny-input-select, .tbx-filtres .selectize-control { min-width:240px; }
 .tbx-filtres label { color:var(--tbx-doux); font-size:12px; font-weight:500; margin-bottom:4px; }
-.tbx .form-control, .tbx .selectize-input, .tbx .selectize-dropdown { background:var(--tbx-carte);
-  color:var(--tbx-texte); }
 .tbx .selectize-input.items.has-items { height:auto; min-height:var(--hk-champ-hauteur); }
-.tbx .selectize-input > input { color:var(--tbx-texte); }
-.tbx .selectize-input .item { background:#1E2733; color:var(--tbx-texte); border-color:var(--tbx-bordure); }
-.tbx .selectize-dropdown .option { color:var(--tbx-texte); }
 
 /* Cartes. */
-.tbx-carte { background:var(--tbx-carte); border:1px solid var(--tbx-bordure); border-radius:12px;
+.tbx-carte { background:var(--tbx-carte); border:1px solid var(--tbx-bordure); border-radius:var(--hk-rayon-carte);
   padding:14px 16px; }
 .tbx-bandeaux { display:flex; flex-direction:column; gap:10px; }
 .tbx-bandeaux > .tbx-carte { display:grid; grid-template-columns:minmax(150px, 220px) 1fr;
@@ -79,12 +67,13 @@
 .tbx-defile { overflow-x:auto; }
 .tbx-defile:focus-visible { outline:2px solid var(--tbx-bleu); outline-offset:2px; }
 .tbx-table { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }
-.tbx-table th, .tbx-table td { padding:7px 9px; white-space:nowrap; border-bottom:1px solid #1F2833; }
+.tbx-table th, .tbx-table td { padding:7px 9px; white-space:nowrap; border-bottom:1px solid var(--hk-bordure-douce); }
 .tbx-table td { text-align:right; }
-.tbx-table thead th { color:var(--tbx-doux); font-weight:500; text-align:right;
+.tbx-table thead th { color:var(--tbx-doux); font-weight:500; text-align:right; background:var(--hk-tableau-entete);
   border-bottom:1px solid var(--tbx-bordure); }
 .tbx-table th[scope="row"], .tbx-table thead th:first-child { position:sticky; left:0; z-index:1;
   background:var(--tbx-carte); text-align:left; font-weight:400; min-width:190px; }
+.tbx-table thead th:first-child { background:var(--hk-tableau-entete); }
 .tbx-table thead th:last-child, .tbx-table td:last-child { font-weight:600; border-left:1px solid var(--tbx-bordure); }
 .tbx-groupe th { position:sticky; left:0; text-align:left; color:var(--tbx-bleu); font-size:12px;
   font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding-top:16px;
@@ -98,7 +87,6 @@
 
 /* Telephone. */
 @media (max-width:600px) {
-  .tbx { padding:12px; border-radius:10px; }
   .tbx-filtres > * , .tbx-filtres .shiny-date-range-input, .tbx-filtres .selectize-control { width:100% !important;
     min-width:0; }
   .tbx-bandeaux > .tbx-carte { grid-template-columns:1fr; row-gap:10px; padding:12px; }
