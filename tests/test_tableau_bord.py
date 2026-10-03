@@ -23,7 +23,9 @@ import logic.donnees as dl
 import logic.tableau_bord as tb
 
 RACINE = Path(__file__).resolve().parent.parent
-MIGRATION = RACINE / "sql" / "migrations" / "2026-10-02_tableau_bord.sql"
+MIGRATIONS = [RACINE / "sql" / "migrations" / "2026-10-02_tableau_bord.sql",
+              RACINE / "sql" / "migrations" / "2026-10-03_tableau_bord_direction.sql"]
+AUJOURD_HUI = date(2099, 12, 31)  # les pieces de test sont datees de 2099
 PREFIXE = "TBTEST-"
 DEBUT, FIN = date(2099, 3, 1), date(2099, 4, 30)
 
@@ -74,11 +76,31 @@ def _soldes(fin):
             for r in s.itertuples()}
 
 
+def _migrer():
+    with dl._connexion() as c, c.cursor() as cur:
+        for m in MIGRATIONS:
+            cur.execute(m.read_text(encoding="utf-8"))
+
+
+def _inserer(pieces):
+    with dl._connexion() as c, c.cursor() as cur:
+        for piece, centre, journal, jour, statut, modele, lignes, *autre in pieces:
+            contrepartie = autre[0] if autre else ""
+            for i, (compte, libelle, debit, credit, *tiers) in enumerate(lignes):
+                cur.execute("""
+                    INSERT INTO ecritures (id_ligne, id_piece, journal, centre, date_piece, compte,
+                                           libelle, debit, credit, statut, modele, code_tiers,
+                                           centre_contrepartie)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            (f"{PREFIXE}{piece}-{i}", PREFIXE + piece, journal, centre, jour, compte,
+                             libelle, debit, credit, statut, modele, tiers[0] if tiers else "",
+                             contrepartie))
+
+
 @pytest.fixture(scope="module")
 def donnees():
-    sql = MIGRATION.read_text(encoding="utf-8")
+    _migrer()
     with dl._connexion() as c, c.cursor() as cur:
-        cur.execute(sql)
         cur.execute("DELETE FROM ecritures WHERE id_ligne LIKE %s", (PREFIXE + "%",))
     avant = _soldes(date(2099, 2, 28))
     with dl._connexion() as c, c.cursor() as cur:
@@ -90,7 +112,7 @@ def donnees():
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                             (f"{PREFIXE}{piece}-{i}", PREFIXE + piece, journal, centre, jour, compte,
                              libelle, debit, credit, statut, modele))
-    yield {"avant": avant, "r": tb.calculer(DEBUT, FIN, ["TAM", "SAA"])}
+    yield {"avant": avant, "r": tb.calculer(DEBUT, FIN, ["TAM", "SAA"], AUJOURD_HUI)}
     with dl._connexion() as c, c.cursor() as cur:
         cur.execute("DELETE FROM ecritures WHERE id_ligne LIKE %s", (PREFIXE + "%",))
 
@@ -163,7 +185,7 @@ def test_tableau_egal_aux_bandeaux(donnees):
 
 @base
 def test_un_seul_centre_ne_voit_que_lui(donnees):
-    r = tb.calculer(DEBUT, FIN, ["SAA"])
+    r = tb.calculer(DEBUT, FIN, ["SAA"], AUJOURD_HUI)
     assert list(r["par_centre"]) == ["SAA"]
     assert r["ensemble"]["resultat"] == 15000
     assert _ligne(r, "Contribution au SIAO")["Total"] != 15000
@@ -182,7 +204,7 @@ def test_soldes_caisses_et_banque(donnees):
 
 @base
 def test_periode_sans_mouvement():
-    r = tb.calculer(date(2098, 1, 1), date(2098, 1, 31), ["TAM"])
+    r = tb.calculer(date(2098, 1, 1), date(2098, 1, 31), ["TAM"], AUJOURD_HUI)
     assert r["vide"]
     assert r["mois"] == ["2098-01"]
 
@@ -207,3 +229,140 @@ def test_onglet_reserve_au_comptable():
 def test_le_serveur_verifie_le_droit():
     source = (RACINE / "tableau_bord.py").read_text(encoding="utf-8")
     assert "req(autorise())" in source
+
+
+@base
+def test_fiabilite_du_jeu(donnees):
+    f = donnees["r"]["fiches"]["TAM"]["fiabilite"]["controles"]
+    assert f["non_validees"]["nombre"] == 1
+    assert f["attente"]["nombre"] == 1 and f["attente"]["montant"] == 12000
+    assert f["non_classe"]["nombre"] == 1
+
+
+@base
+def test_ecart_caisse_nul(donnees):
+    for f in donnees["r"]["fiches"].values():
+        assert abs(f["ecart_caisse"]) < 0.01
+
+
+# --- ete 2099 : camp, mois du cours, flux entre centres, maximum de salaires ---
+
+ETE_DEBUT, ETE_FIN = date(2099, 6, 1), date(2099, 7, 31)
+ETE = [
+    # frais sans mois cite paye en juin (mois de camp) et sans eleve : camp
+    ("e1", "TAM", "CP", "2099-06-05", "validee", "", [
+        ("571100", "AVANCE FRAIS CA ELEVE C", 50000, 0), ("411000", "AVANCE FRAIS CA ELEVE C", 0, 50000)]),
+    # frais de mai paye en juin : cours d'appui, un mois de retard
+    ("e2", "TAM", "CP", "2099-06-06", "validee", "", [
+        ("571100", "FRAIS CA ELEVE D/MAI", 40000, 0), ("411000", "FRAIS CA ELEVE D/MAI", 0, 40000, "411TESTD")]),
+    ("e3", "TAM", "CP", "2099-06-07", "validee", "", [
+        ("571100", "FRAIS CA ELEVE D/JUIN", 20000, 0), ("411000", "FRAIS CA ELEVE D/JUIN", 0, 20000, "411TESTD")]),
+    # pret de Tampouy a Saaba, saisi des deux cotes
+    ("e4", "TAM", "CP", "2099-06-08", "validee", "transfert_interne", [
+        ("585000", "PRET SAA", 7000, 0), ("571100", "PRET SAA", 0, 7000)], "SAA"),
+    ("e5", "SAA", "CP", "2099-06-09", "validee", "transfert_interne", [
+        ("571100", "PRET TAM", 7000, 0), ("585000", "PRET TAM", 0, 7000)], "TAM"),
+    # vacation de juin payee en juillet
+    ("e6", "TAM", "CMD", "2099-07-03", "validee", "", [
+        ("401000", "PAIEMENT VACATION JUIN", 30000, 0), ("571200", "PAIEMENT VACATION JUIN", 0, 30000)]),
+]
+
+
+@pytest.fixture(scope="module")
+def ete():
+    _migrer()
+    _inserer(ETE)
+    yield {"deux": tb.calculer(ETE_DEBUT, ETE_FIN, ["TAM", "SAA"], AUJOURD_HUI),
+           "seul": tb.calculer(ETE_DEBUT, ETE_FIN, ["TAM"], AUJOURD_HUI)}
+    with dl._connexion() as c, c.cursor() as cur:
+        cur.execute("DELETE FROM ecritures WHERE id_ligne LIKE %s", (PREFIXE + "e%",))
+
+
+@base
+def test_camp_reconnu_hors_mois_cite(ete):
+    t = ete["seul"]["tableau"]
+    assert t[t["libelle"] == "Camp de vacances"].iloc[0]["Total"] == 50000
+    assert t[t["libelle"] == "Cours d'appui"].iloc[0]["Total"] == 60000
+
+
+@base
+def test_mois_du_cours_et_retard(ete):
+    e = ete["seul"]["fiches"]["TAM"]["eleves"]
+    juin = next(x for x in e["par_mois"] if x["mois"] == "2099-06")
+    assert juin["frais"] == 20000 and juin["eleves"] == 1
+    assert juin["vacations"] == 30000                    # vacation de juin payee en juillet
+    assert e["retard"]["1"] == pytest.approx(40000 / 60000)
+    assert e["retard"]["0"] == pytest.approx(20000 / 60000)
+    assert e["sans_tiers"] == 1                          # l'avance de camp sans eleve
+
+
+@base
+def test_maximum_de_salaires(ete):
+    m = {x["mois"]: x for x in ete["seul"]["fiches"]["TAM"]["mensuel"]}
+    assert m["2099-06"]["maximum"] == pytest.approx(110000 * 0.85)
+    assert m["2099-06"]["mois_camp"] is False             # 50 000 de camp sur 110 000
+    assert m["2099-07"]["salaires"] == 30000 and m["2099-07"]["maximum"] == 0
+
+
+@base
+def test_flux_entre_centres_choisis_comptes_une_fois(ete):
+    deux, seul = ete["deux"], ete["seul"]
+    # un centre est toujours vu seul : le pret compte chez lui
+    assert deux["fiches"]["TAM"]["hors_exploitation"] == seul["fiches"]["TAM"]["hors_exploitation"] == 7000
+    # l'ensemble ne le montre pas : il n'est pas sorti du groupe
+    prets = deux["tableau"][deux["tableau"]["libelle"].str.startswith("Prêts entre centres")]
+    assert prets["Total"].isna().all()
+    assert deux["interne"] == 7000
+    total = deux["totaux"]["hors_exploitation"]["Total"]
+    assert deux["ensemble"]["hors_exploitation"] == (0 if math.isnan(total) else total) == 0
+
+
+@base
+def test_fiche_identique_quel_que_soit_le_choix_des_centres(ete):
+    a, b = ete["seul"]["fiches"]["TAM"], ete["deux"]["fiches"]["TAM"]
+    for cle in ("encaissements", "charges", "resultat", "hors_exploitation", "argent_disponible",
+                "salaires", "maximum_salaires"):
+        assert a[cle] == b[cle]
+    # page 1 (centre seul) = page 2
+    assert ete["seul"]["ensemble"]["resultat"] == a["resultat"]
+    assert ete["seul"]["totaux"]["resultat"]["Total"] == a["resultat"]
+
+
+@base
+def test_cible_de_marge_par_centre(ete):
+    with dl._connexion() as c, c.cursor() as cur:
+        cur.execute("SELECT cible_marge FROM parametres_centre WHERE centre = 'TAM'")
+        ancienne = cur.fetchone()[0]
+        cur.execute("UPDATE parametres_centre SET cible_marge = 0.20 WHERE centre = 'TAM'")
+    try:
+        r = tb.calculer(ETE_DEBUT, ETE_FIN, ["TAM"], AUJOURD_HUI)
+        juin = next(x for x in r["fiches"]["TAM"]["mensuel"] if x["mois"] == "2099-06")
+        assert juin["maximum"] == pytest.approx(110000 * 0.80)
+    finally:
+        with dl._connexion() as c, c.cursor() as cur:
+            cur.execute("UPDATE parametres_centre SET cible_marge = %s WHERE centre = 'TAM'", (ancienne,))
+
+
+@base
+def test_alertes_calculees(ete):
+    textes = [t for _, c, t in ete["seul"]["alertes"] if c == "TAM"]
+    assert any("élève rattaché" in t for t in textes)
+
+
+def test_periode_inversee_message_clair():
+    source = (RACINE / "tableau_bord.py").read_text(encoding="utf-8")
+    assert "La date de fin est avant la date de début" in source
+
+
+def test_lecture_du_mois_comme_l_assistant():
+    assert tb._mois_cours("FRAIS CA NOM/MARS", date(2026, 4, 2)) == ["2026-03"]
+    assert tb._mois_cours("FRAIS CA DE DEC - NOM", date(2026, 1, 10)) == ["2025-12"]
+    assert tb._mois_cours("AVANCE FRAIS CA KABORE", date(2026, 7, 10)) == []
+
+
+def test_trous_d_une_semaine():
+    from datetime import timedelta
+    jours = [date(2026, 5, 18) + timedelta(days=i) for i in range(12)]
+    jours = [j for j in jours if j.isoweekday() < 7]
+    t = tb._trous(jours + [date(2026, 6, 3)])
+    assert t["nombre"] == 1 and t["jours"] == len(jours)
