@@ -24,7 +24,8 @@ import logic.tableau_bord as tb
 
 RACINE = Path(__file__).resolve().parent.parent
 MIGRATIONS = [RACINE / "sql" / "migrations" / "2026-10-02_tableau_bord.sql",
-              RACINE / "sql" / "migrations" / "2026-10-03_tableau_bord_direction.sql"]
+              RACINE / "sql" / "migrations" / "2026-10-03_tableau_bord_direction.sql",
+              RACINE / "sql" / "migrations" / "2026-10-03b_tableau_bord_equipement_camp.sql"]
 AUJOURD_HUI = date(2099, 12, 31)  # les pieces de test sont datees de 2099
 PREFIXE = "TBTEST-"
 DEBUT, FIN = date(2099, 3, 1), date(2099, 4, 30)
@@ -249,9 +250,18 @@ def test_ecart_caisse_nul(donnees):
 
 ETE_DEBUT, ETE_FIN = date(2099, 6, 1), date(2099, 7, 31)
 ETE = [
-    # frais sans mois cite paye en juin (mois de camp) et sans eleve : camp
+    # frais de camp reconnu au libelle (FRAIS CV), sans eleve rattache
     ("e1", "TAM", "CP", "2099-06-05", "validee", "", [
-        ("571100", "AVANCE FRAIS CA ELEVE C", 50000, 0), ("411000", "AVANCE FRAIS CA ELEVE C", 0, 50000)]),
+        ("571100", "AVANCE FRAIS CV ELEVE C", 50000, 0), ("411000", "AVANCE FRAIS CV ELEVE C", 0, 50000)]),
+    # frais d'ete sans mois ni mot du camp : reste en cours d'appui (pas de regle au mois)
+    ("e0", "TAM", "CP", "2099-07-05", "validee", "", [
+        ("571100", "AVANCE FRAIS CA ELEVE E", 5000, 0), ("411000", "AVANCE FRAIS CA ELEVE E", 0, 5000, "411TESTE")]),
+    # achat de materiel paye par le 401 : equipement, hors exploitation
+    ("e7", "TAM", "CMD", "2099-07-06", "validee", "", [
+        ("401000", "INSTALLATION VENTILATION", 9000, 0), ("571200", "INSTALLATION VENTILATION", 0, 9000)]),
+    # vacation du camp : pas dans le graphique par mois de cours
+    ("e8", "TAM", "CMD", "2099-07-07", "validee", "", [
+        ("401000", "PAIEMENT VACATION CAMP", 4000, 0), ("571200", "PAIEMENT VACATION CAMP", 0, 4000)]),
     # frais de mai paye en juin : cours d'appui, un mois de retard
     ("e2", "TAM", "CP", "2099-06-06", "validee", "", [
         ("571100", "FRAIS CA ELEVE D/MAI", 40000, 0), ("411000", "FRAIS CA ELEVE D/MAI", 0, 40000, "411TESTD")]),
@@ -279,10 +289,24 @@ def ete():
 
 
 @base
-def test_camp_reconnu_hors_mois_cite(ete):
+def test_camp_reconnu_au_libelle_seulement(ete):
     t = ete["seul"]["tableau"]
     assert t[t["libelle"] == "Camp de vacances"].iloc[0]["Total"] == 50000
-    assert t[t["libelle"] == "Cours d'appui"].iloc[0]["Total"] == 60000
+    assert t[t["libelle"] == "Cours d'appui"].iloc[0]["Total"] == 65000
+
+
+@base
+def test_camp_masque_sans_camp(donnees):
+    r = tb.calculer(DEBUT, FIN, ["SAA"], AUJOURD_HUI)
+    assert not (r["tableau"]["libelle"] == "Camp de vacances").any()
+
+
+@base
+def test_equipement_hors_exploitation(ete):
+    t = ete["seul"]["tableau"]
+    ligne = t[t["libelle"] == "Achats d'équipement"].iloc[0]
+    assert ligne["bloc"] == tb.HORS and ligne["Total"] == 9000
+    assert ete["seul"]["fiches"]["TAM"]["hors_exploitation"] == 7000 + 9000
 
 
 @base
@@ -294,27 +318,31 @@ def test_mois_du_cours_et_retard(ete):
     assert e["retard"]["1"] == pytest.approx(40000 / 60000)
     assert e["retard"]["0"] == pytest.approx(20000 / 60000)
     assert e["sans_tiers"] == 1                          # l'avance de camp sans eleve
+    juil = next(x for x in e["par_mois"] if x["mois"] == "2099-07")
+    assert math.isnan(juil["vacations"])                 # la vacation du camp n'y est pas
 
 
 @base
 def test_maximum_de_salaires(ete):
     m = {x["mois"]: x for x in ete["seul"]["fiches"]["TAM"]["mensuel"]}
     assert m["2099-06"]["maximum"] == pytest.approx(110000 * 0.85)
+    # juillet : 5 000 recus, vacations 30 000 + 4 000 (camp), equipement hors exploitation
+    assert m["2099-07"]["salaires"] == 34000
     assert m["2099-06"]["mois_camp"] is False             # 50 000 de camp sur 110 000
-    assert m["2099-07"]["salaires"] == 30000 and m["2099-07"]["maximum"] == 0
+    assert m["2099-07"]["maximum"] == pytest.approx(5000 * 0.85)
 
 
 @base
 def test_flux_entre_centres_choisis_comptes_une_fois(ete):
     deux, seul = ete["deux"], ete["seul"]
     # un centre est toujours vu seul : le pret compte chez lui
-    assert deux["fiches"]["TAM"]["hors_exploitation"] == seul["fiches"]["TAM"]["hors_exploitation"] == 7000
+    assert deux["fiches"]["TAM"]["hors_exploitation"] == seul["fiches"]["TAM"]["hors_exploitation"] == 16000
     # l'ensemble ne le montre pas : il n'est pas sorti du groupe
     prets = deux["tableau"][deux["tableau"]["libelle"].str.startswith("Prêts entre centres")]
     assert prets["Total"].isna().all()
     assert deux["interne"] == 7000
     total = deux["totaux"]["hors_exploitation"]["Total"]
-    assert deux["ensemble"]["hors_exploitation"] == (0 if math.isnan(total) else total) == 0
+    assert deux["ensemble"]["hors_exploitation"] == total == 9000   # l'equipement seul
 
 
 @base

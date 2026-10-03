@@ -169,6 +169,7 @@ def _echelle(*series):
 
 def _graphique_resultat(fiche):
     m = fiche["mensuel"]
+    camp = any(not x["vide"] and x["mois_camp"] for x in m)
     echelle = _echelle([x.get("encaissements", 0) for x in m], [x.get("salaires", 0) for x in m],
                        [x.get("maximum", 0) for x in m])
     points = []
@@ -184,16 +185,17 @@ def _graphique_resultat(fiche):
             "traits": [(x["salaires"], C_SALAIRES, "plein"), (max(x["maximum"], 0), C_MAXIMUM, "pointille")],
             "titre": (f"{_mois(x['mois'])}{' (camp)' if x['mois_camp'] else ''}\n"
                       f"Argent reçu : {_f(x['encaissements'])} F\nSalaires payés : {_f(x['salaires'])} F\n"
-                      f"Maximum de salaires : {_f(x['maximum'])} F"
-                      + ("\nSalaires au-dessus du maximum" if depasse else "")),
+                      f"Plafond salarial : {_f(x['maximum'])} F"
+                      + ("\nSalaires au-dessus du plafond" if depasse else "")),
         })
     return ui.div(
         {"class": "tbx-carte"},
-        ui.div({"class": "tbx-titre"}, "Argent reçu, salaires et montant maximum de salaires"),
-        ui.p({"class": "tbx-carte-sous"}, "En milliers de FCFA. Les mois de camp de vacances sont en bleu foncé."),
-        _legende(("carre", C_SCOLAIRE, "Mois scolaire"), ("carre", C_CAMP, "Camp de vacances"),
-                 ("trait", C_SALAIRES, "Salaires payés"), ("pointille", C_MAXIMUM, "Maximum de salaires")),
-        _colonnes(points, echelle, aria="Argent reçu, salaires payés et maximum de salaires, mois par mois"),
+        ui.div({"class": "tbx-titre"}, "Recettes, salaires et plafond salarial"),
+        ui.p({"class": "tbx-carte-sous"}, "En milliers de FCFA."
+             + (" Les mois de camp de vacances sont en bleu foncé." if camp else "")),
+        _legende(("carre", C_SCOLAIRE, "Mois scolaire"), *([("carre", C_CAMP, "Camp de vacances")] if camp else []),
+                 ("trait", C_SALAIRES, "Salaires payés"), ("pointille", C_MAXIMUM, "Plafond salarial")),
+        _colonnes(points, echelle, aria="Recettes, salaires payés et plafond salarial, mois par mois"),
     )
 
 
@@ -209,7 +211,7 @@ def _graphique_eleves(fiche):
     } for x in rangs]
     return ui.div(
         {"class": "tbx-carte"},
-        ui.div({"class": "tbx-titre"}, "Frais et vacations par mois du cours"),
+        ui.div({"class": "tbx-titre"}, "Recettes et salaires par mois de cours"),
         ui.p({"class": "tbx-carte-sous"}, "Le mois du cours est lu dans le libellé (« FRAIS CA NOM/MARS »), "
                                           "pas la date du paiement. Camp de vacances exclu."),
         _legende(("carre", C_SCOLAIRE, "Frais encaissés pour le mois"),
@@ -228,12 +230,12 @@ def _graphique_caisse(fiche):
               for m, s in soldes]
     return ui.div(
         {"class": "tbx-carte"},
-        ui.div({"class": "tbx-titre"}, "Argent dans les caisses en fin de mois"),
+        ui.div({"class": "tbx-titre"}, "Trésorerie en fin de mois et capital de base"),
         ui.p({"class": "tbx-carte-sous"}, "En milliers de FCFA, caisse principale et petite caisse. "
                                           "La banque est commune à tous les centres et n'y figure pas."),
         _legende(("carre", C_SCOLAIRE, "Argent en caisse"),
-                 ("pointille", C_MAXIMUM, f"Cible : {calc.mois_txt(fiche['parametres']['cible_tresorerie_mois'])}"
-                                          " de dépenses")),
+                 ("pointille", C_MAXIMUM, f"Capital de base : {calc.mois_txt(fiche['parametres']['cible_tresorerie_mois'])}"
+                                          " de charges")),
         _colonnes(points, echelle, aria="Argent en caisse en fin de mois comparé à la cible"),
     )
 
@@ -316,7 +318,7 @@ def _bandeau(ns, nom, code, c, notes=(), principal=False):
     marge = calc._div(c["resultat"], c["encaissements"])
     mot = "Bénéfice" if c["resultat"] >= 0 else "Perte"
     cible = c.get("cible_tresorerie", float("nan"))
-    detail_caisse = f"Cible : {_f(cible)} F" if not calc._nan(cible) else "Caisses des centres choisis"
+    detail_caisse = f"Capital de base : {_f(cible)} F" if not calc._nan(cible) else "Caisses des centres choisis"
     return ui.div(
         {"class": "tbx-carte tbx-bandeau" + (" tbx-bandeau--principal" if principal else "")},
         ui.div({"class": "tbx-bandeau-tete"},
@@ -362,6 +364,11 @@ def _alertes(r, noms):
     )
 
 
+def _cible_marge(centres, fiches):
+    cibles = {fiches[c]["parametres"]["cible_marge"] for c in centres}
+    return f"Cible : {calc.pct(cibles.pop(), 0)}" if len(cibles) == 1 else "Cible propre à chaque centre"
+
+
 def _comparatif(ns, r, noms):
     fiches = r["fiches"]
     centres = r["centres"]
@@ -376,10 +383,10 @@ def _comparatif(ns, r, noms):
     lignes = [
         ligne("Argent reçu", "Encaissements d'exploitation de la période",
               [cellule(f"{_f(fiches[c]['encaissements'])} F", calc.NEUTRE) for c in centres]),
-        ligne("Résultat et marge", "Cible de marge du centre",
+        ligne("Bénéfice et marge", _cible_marge(centres, fiches),
               [cellule(f"{_f(fiches[c]['resultat'])} F, soit {calc.pct(fiches[c]['marge'])}",
                        fiches[c]["niveaux"]["marge"]) for c in centres]),
-        ligne("Salaires contre montant maximum", "Maximum compatible avec la cible de marge",
+        ligne("Salaires contre plafond", "Plafond compatible avec la cible de marge",
               [cellule(f"{_f(fiches[c]['salaires'])} pour {_f(fiches[c]['maximum_salaires'])} F",
                        fiches[c]["niveaux"]["salaires"]) for c in centres]),
         ligne("Élèves payants", "Mois scolaire typique (médiane), face au seuil de rentabilité",
@@ -387,7 +394,7 @@ def _comparatif(ns, r, noms):
                        f"{_f(fiches[c]['eleves']['eleves_typiques'])} élèves"
                        + (f" pour {fiches[c]['seuil_eleves']}" if fiches[c]["seuil_eleves"] else ""),
                        fiches[c]["niveaux"]["eleves"]) for c in centres]),
-        ligne("Argent disponible", "En mois de dépenses couverts",
+        ligne("Argent disponible", "En mois de charges couverts",
               [cellule(f"{calc.mois_txt(fiches[c]['couverture_mois'])} pour "
                        f"{calc.mois_txt(fiches[c]['parametres']['cible_tresorerie_mois'])}",
                        fiches[c]["niveaux"]["caisse"]) for c in centres]),
@@ -412,7 +419,6 @@ def _comparatif(ns, r, noms):
 
 
 def _vue_ensemble(ns, r, noms):
-    phrases = calc.resume(r, noms)
     cartes = []
     plusieurs = len(r["centres"]) > 1
     if plusieurs:
@@ -431,20 +437,22 @@ def _vue_ensemble(ns, r, noms):
                                      calc.nb(r["non_classes"], "compte non classé est compté",
                                              "comptes non classés sont comptés")
                                      + " en exploitation : à classer dans la table classement_comptes."))
+    # Dans l'ordre de lecture du directeur : les trois chiffres, la
+    # comparaison, puis ce qui demande une action. Le compte de resultat
+    # detaille reste replie (il est aussi dans chaque fiche centre).
     return ui.TagList(
-        ui.div({"class": "tbx-carte tbx-resume"},
-               ui.div({"class": "tbx-resume-titre"}, "En trois phrases"),
-               *[ui.p(p) for p in phrases]) if phrases else None,
         *avertissements,
         ui.div({"class": "tbx-bandeaux"}, *cartes),
         ui.div({"class": "tbx-bandeaux-banque"}, *_banque(r)),
-        _alertes(r, noms),
         _comparatif(ns, r, noms) if plusieurs else None,
-        _section("Compte de résultat mensuel en encaissements",
+        _alertes(r, noms),
+        _deplier("Afficher le compte de résultat mensuel",
                  ui.div({"class": "tbx-carte tbx-carte--tableau"},
-                        _compte_resultat(r["tableau"], r["totaux"], r["mois"])),
-                 sous_titre=("Montants en FCFA. Ensemble des centres choisis, sans les flux entre eux."
-                             if plusieurs else "Montants en FCFA.")),
+                        ui.div({"class": "tbx-titre"}, "Compte de résultat mensuel en encaissements",
+                               ui.span({"class": "tbx-sous-titre"},
+                                       "en FCFA, sans les flux entre les centres choisis"
+                                       if plusieurs else "en FCFA")),
+                        _compte_resultat(r["tableau"], r["totaux"], r["mois"]))),
     )
 
 
@@ -455,7 +463,7 @@ def _onglet_resultat(f, mois):
     lignes_salaires = [
         ("Salaires payés", [_f(m.get("salaires")) if not m["vide"] else "-" for m in f["mensuel"]]
          + [_f(f["salaires"])], "tbx-pct"),
-        ("Maximum de salaires", [_f(m.get("maximum")) if not m["vide"] else "-" for m in f["mensuel"]]
+        ("Plafond salarial", [_f(m.get("maximum")) if not m["vide"] else "-" for m in f["mensuel"]]
          + [_f(f["maximum_salaires"])], "tbx-pct"),
     ]
     return ui.TagList(
@@ -465,7 +473,7 @@ def _onglet_resultat(f, mois):
                       f"{calc.pct(f['marge'])} de l'argent reçu, cible {calc.pct(p['cible_marge'], 0)}",
                       f["niveaux"]["marge"]),
                _tuile("Salaires payés", f"{_f(f['salaires'])} F",
-                      f"Maximum prévu : {_f(f['maximum_salaires'])} F", f["niveaux"]["salaires"]),
+                      f"Plafond : {_f(f['maximum_salaires'])} F", f["niveaux"]["salaires"]),
                _tuile("Rendement des salaires", _ratio(f["rendement_salaires"]),
                       f"F reçus pour 1 F de salaires, cible {_ratio(f['rendement_cible'])}",
                       f["niveaux"]["rendement"])),
@@ -522,10 +530,10 @@ def _onglet_caisse(f, r):
         ui.div({"class": "tbx-tuiles"},
                _tuile("Argent disponible", f"{_f(f['argent_disponible'])} F",
                       " · ".join(f"{i} {_f(s)}" for i, s in f["caisses"]) or "Caisses du centre"),
-               _tuile("Cible de sécurité", f"{_f(f['cible_tresorerie'])} F",
-                      f"{calc.mois_txt(p['cible_tresorerie_mois'])} de dépenses d'exploitation"),
-               _tuile("Mois de dépenses couverts", calc.mois_txt(f["couverture_mois"]),
-                      f"Dépenses moyennes : {_f(f['charges_mois'])} F par mois", f["niveaux"]["caisse"]),
+               _tuile("Capital de base", f"{_f(f['cible_tresorerie'])} F",
+                      f"{calc.mois_txt(p['cible_tresorerie_mois'])} de charges d'exploitation"),
+               _tuile("Mois de charges couverts", calc.mois_txt(f["couverture_mois"]),
+                      f"Charges moyennes : {_f(f['charges_mois'])} F par mois", f["niveaux"]["caisse"]),
                _tuile("Banque", banque or "-", "Commune à tous les centres")),
         _graphique_caisse(f),
         ui.div({"class": "tbx-deux"},

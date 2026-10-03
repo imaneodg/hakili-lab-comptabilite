@@ -42,7 +42,7 @@ CONTRIBUTION, ATTENTE, NON_CLASSE = "contribution", "attente", "non_classe"
 CORRECT, SURVEILLER, ATTENTION, NEUTRE = "correct", "surveiller", "attention", "neutre"
 ORDRE_NIVEAU = {ATTENTION: 0, SURVEILLER: 1, NEUTRE: 2, CORRECT: 3}
 
-PARAMETRES_DEFAUT = {"cible_marge": 0.15, "cible_tresorerie_mois": 2.0, "mois_camp": [6, 7, 8]}
+PARAMETRES_DEFAUT = {"cible_marge": 0.15, "cible_tresorerie_mois": 2.0}
 
 
 def _nan(v):
@@ -99,13 +99,18 @@ def _lire(debut, fin, centres):
         FROM flux_tableau_bord(%s, %s, %s)
         WHERE rubrique NOT IN (%s, %s, %s)
         GROUP BY 1, 2, 3, 4, 5""", (centres, debut, fin, centres, COURS, CAMP, SALAIRES))
+    # camp : le libelle porte un des mots des regles du camp (CAMP, FRAIS CV...),
+    # pour reconnaitre aussi les vacations du camp.
     detail = dl._lire_df("""
         SELECT centre, mois, rubrique, sens, false AS interne, date_piece, code_tiers, libelle,
+               EXISTS (SELECT 1 FROM classement_comptes c, unnest(c.motifs) m
+                       WHERE c.rubrique = %s
+                         AND tb_normaliser(f.libelle) LIKE '%%' || tb_normaliser(m) || '%%') AS camp,
                sum(montant)::float AS montant
-        FROM flux_tableau_bord(%s, %s, %s)
+        FROM flux_tableau_bord(%s, %s, %s) f
         WHERE rubrique IN (%s, %s, %s)
         GROUP BY centre, mois, rubrique, sens, date_piece, code_tiers, libelle""",
-                         (debut, fin, centres, COURS, CAMP, SALAIRES))
+                         (CAMP, debut, fin, centres, COURS, CAMP, SALAIRES))
     pieces = dl._lire_df("""
         SELECT centre,
                count(DISTINCT id_piece) FILTER (WHERE statut IN %s) AS non_validees,
@@ -134,8 +139,7 @@ def _parametres(parametres, centres):
     p = {c: dict(PARAMETRES_DEFAUT) for c in centres}
     for r in parametres.itertuples():
         p[r.centre] = {"cible_marge": float(r.cible_marge),
-                       "cible_tresorerie_mois": float(r.cible_tresorerie_mois),
-                       "mois_camp": list(r.mois_camp or [])}
+                       "cible_tresorerie_mois": float(r.cible_tresorerie_mois)}
     return p
 
 
@@ -147,17 +151,13 @@ def _mois_cours(libelle, jour):
     return [f"{a:04d}-{m:02d}" for a, m in mois_du_libelle(libelle, jour)]
 
 
-def _preparer_detail(detail, params):
-    """Ajoute a chaque frais ou vacation ses mois de cours. Un frais d'eleve
-    sans mois cite, paye pendant un mois de camp, passe en camp de vacances."""
+def _preparer_detail(detail):
+    """Ajoute a chaque frais ou vacation ses mois de cours. Le camp de
+    vacances n'est reconnu qu'au libelle (regles de classement_comptes),
+    jamais au mois du paiement."""
     d = detail.copy()
-    if len(d) == 0:
-        d["mois_cours"] = pd.Series(dtype=object)
-        return d
-    d["mois_cours"] = [_mois_cours(l, j) for l, j in zip(d["libelle"], d["date_piece"])]
-    camp = [r == COURS and not mc and pd.Timestamp(j).month in params[c]["mois_camp"]
-            for r, mc, j, c in zip(d["rubrique"], d["mois_cours"], d["date_piece"], d["centre"])]
-    d.loc[camp, "rubrique"] = CAMP
+    d["mois_cours"] = ([_mois_cours(l, j) for l, j in zip(d["libelle"], d["date_piece"])]
+                       if len(d) else pd.Series(dtype=object))
     return d
 
 
@@ -268,7 +268,7 @@ def _mensuel(flux, lignes, mois, cible_marge):
 
 
 def _eleves(detail, mois, fin, mois_camp=()):
-    """Eleves payants, frais moyen et retard de paiement, par mois du cours."""
+    """mois_camp : les mois ('AAAA-MM') ou le camp fait l'essentiel des recettes."""
     if len(detail):
         frais = detail[(detail["rubrique"] == COURS) & (detail["sens"] == "entree")]
         vac = detail[detail["rubrique"] == SALAIRES]
@@ -290,8 +290,7 @@ def _eleves(detail, mois, fin, mois_camp=()):
     par_mois = pd.DataFrame(lignes, columns=["mois_cours", "tiers", "montant"])
     vac_mois = {}
     for r in vac.itertuples():
-        # Vacation sans mois cite, payee pendant le camp : c'est le camp.
-        if not r.mois_cours and int(r.mois[5:]) in mois_camp:
+        if r.camp:  # vacation du camp de vacances
             continue
         cibles = r.mois_cours or [r.mois]
         for mc in cibles:
@@ -314,7 +313,7 @@ def _eleves(detail, mois, fin, mois_camp=()):
     fin_mois = pd.Period(fin, "M")
     candidats = [x for x in rangs if not _nan(x["eleves"]) and x["eleves"] > 0
                  and (len(mois) == 1 or (pd.Period(x["mois"], "M") < fin_mois
-                                         and int(x["mois"][5:]) not in mois_camp))]
+                                         and x["mois"] not in mois_camp))]
     typique = statistics.median(x["eleves"] for x in candidats) if candidats else None
     total_retard = sum(retard.values())
     eleves_mois = sum(x["eleves"] for x in rangs if not _nan(x["eleves"]))
@@ -367,10 +366,16 @@ def _fiche(c, flux, detail, lignes, mois, fin, params, soldes, soldes_debut, men
     vers_banque = float(banque[banque["centre"] == c]["mouvement"].sum())
     attendu = debut_caisse + chiffres["resultat"] - chiffres["hors_exploitation"] + transferts - vers_banque
 
-    eleves = _eleves(dc, mois, fin, p["mois_camp"])
+    eleves = _eleves(dc, mois, fin, {m["mois"] for m in pleins if m["mois_camp"]})
     fm = eleves["frais_moyen"]
     seuil = None if _nan(charges_mois) or _nan(fm) or not fm else math.ceil(charges_mois / fm)
     au_dessus = [m["mois"] for m in pleins if m["salaires"] > m["maximum"]]
+    # Mois de suite au-dessus du plafond, en partant du dernier mois.
+    de_suite = 0
+    for m in reversed(pleins):
+        if m["salaires"] <= m["maximum"]:
+            break
+        de_suite += 1
     typique = eleves["eleves_typiques"]
     rendement, rendement_cible = _div(enc, salaires), (_div(enc, maximum) if maximum > 0 else float("nan"))
 
@@ -381,6 +386,7 @@ def _fiche(c, flux, detail, lignes, mois, fin, params, soldes, soldes_debut, men
         "salaires": salaires,
         "maximum_salaires": maximum,
         "mois_salaires_au_dessus": au_dessus,
+        "mois_salaires_au_dessus_de_suite": de_suite,
         "nb_mois": len(pleins),
         "rendement_salaires": rendement,
         "rendement_cible": rendement_cible,
@@ -523,7 +529,7 @@ def _niveaux_fiabilite(f, fiche):
     }
 
 
-# --- alertes et resume ------------------------------------------------------------
+# --- alertes --------------------------------------------------------------------
 
 def pct(v, dec=1):
     return "-" if _nan(v) else f"{v * 100:.{dec}f} %".replace(".", ",")
@@ -535,12 +541,16 @@ def mois_txt(v):
     return f"{v:.1f}".replace(".", ",").replace(",0", "") + " mois"
 
 
-def millions(v):
-    return f"{v / 1e6:.2f} M FCFA".replace(".", ",")
-
-
 def nb(n, singulier, pluriel):
     return f"{n} {singulier if n == 1 else pluriel}"
+
+
+MOIS_NOMS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+             "septembre", "octobre", "novembre", "décembre"]
+
+
+def _nom_mois(aaaa_mm):
+    return MOIS_NOMS[int(aaaa_mm[5:]) - 1]
 
 
 def _alertes(c, fiche, fiab, mois):
@@ -549,23 +559,25 @@ def _alertes(c, fiche, fiab, mois):
     niv = fiche["niveaux"]
     n, total = len(fiche["mois_salaires_au_dessus"]), fiche["nb_mois"]
     if n and niv["salaires"] != CORRECT:
+        serie = fiche["mois_salaires_au_dessus_de_suite"]
+        quand = f"depuis {serie} mois ({n} mois sur {total})" if serie >= 2 else f"{n} mois sur {total}"
         camp = [m["mois"] for m in fiche["mensuel"] if not m["vide"] and m["mois_camp"]
                 and m["salaires"] <= m["maximum"]]
         suite = " Seuls les mois de camp compensent." if camp and n == total - len(camp) else ""
         a.append((ATTENTION if n * 2 >= total else SURVEILLER, c,
-                  f"Les salaires dépassent le montant maximum {n} mois sur {total}.{suite}"))
+                  f"Salaires au-dessus du plafond {quand}.{suite}"))
     if niv["marge"] == ATTENTION:
         a.append((ATTENTION, c, f"Marge négative : {pct(fiche['marge'])} de l'argent reçu."))
     elif niv["marge"] == SURVEILLER:
         a.append((SURVEILLER, c, f"Marge de {pct(fiche['marge'])}, sous la cible de "
                                  f"{pct(fiche['parametres']['cible_marge'], 0)}."))
     if niv["caisse"] == ATTENTION:
-        a.append((ATTENTION, c, f"La caisse couvre {mois_txt(fiche['couverture_mois'])} de dépenses, pour "
-                                f"une cible de {mois_txt(fiche['parametres']['cible_tresorerie_mois'])}."))
+        a.append((ATTENTION, c, f"La caisse couvre {mois_txt(fiche['couverture_mois'])} de charges, pour un "
+                                f"capital de base de {mois_txt(fiche['parametres']['cible_tresorerie_mois'])}."))
     versee = fiche.get("contribution_mois", [])
     dernier = [m for m in fiche["mensuel"] if not m["vide"]]
     if len(mois) > 1 and versee and mois[-1] not in versee and dernier and dernier[-1]["mois"] == mois[-1]:
-        a.append((SURVEILLER, c, "La contribution au siège du dernier mois n'est pas encore enregistrée."))
+        a.append((SURVEILLER, c, f"Contribution au siège de {_nom_mois(mois[-1])} pas encore envoyée."))
     ctl, nf = fiab["controles"], fiab["niveaux"]
     if nf["sans_tiers"] != CORRECT:
         a.append((nf["sans_tiers"], c,
@@ -588,43 +600,6 @@ def _alertes(c, fiche, fiab, mois):
     return a
 
 
-def resume(r, noms):
-    """Trois phrases calculees : resultat, salaires, caisse."""
-    e, fiches = r["ensemble"], r["fiches"]
-    if not fiches or r["vide"]:
-        return []
-    plusieurs = len(fiches) > 1
-    qui = "Les centres choisis ont" if plusieurs else f"{noms.get(r['centres'][0], r['centres'][0])} a"
-    cible = e["cible_marge"]
-    marge = _div(e["resultat"], e["encaissements"])
-    if _nan(marge):
-        p1 = f"{qui} rien encaissé sur la période."
-    elif e["resultat"] >= 0:
-        p1 = (f"{qui} gagné {millions(e['resultat'])}, soit {pct(marge)} de ce qu'ils ont reçu : "
-              if plusieurs else f"{qui} gagné {millions(e['resultat'])}, soit {pct(marge)} de ce qu'il a reçu : ")
-        p1 += ("c'est au niveau de la cible" if marge >= cible else "c'est sous la cible") + f" de {pct(cible, 0)}."
-    else:
-        p1 = f"{qui} perdu {millions(-e['resultat'])}, soit {pct(marge)} de l'argent reçu."
-    trop = [noms.get(c, c) for c, f in fiches.items() if f["nb_mois"] and f["salaires"] > f["maximum_salaires"]]
-    if not trop:
-        p2 = "Les salaires restent sous le montant maximum compatible avec la cible de marge."
-    elif len(trop) == len(fiches):
-        p2 = ("Les salaires dépassent le montant maximum prévu pour tenir cette cible"
-              + (", dans tous les centres." if plusieurs else "."))
-    else:
-        p2 = f"Les salaires dépassent le montant maximum à {', '.join(trop)}."
-    couv = [f["couverture_mois"] for f in fiches.values() if not _nan(f["couverture_mois"])]
-    cible_t = mois_txt(max(f["parametres"]["cible_tresorerie_mois"] for f in fiches.values()))
-    if not couv:
-        p3 = "Pas assez de mouvements pour mesurer ce que couvre la caisse."
-    elif all(f["niveaux"]["caisse"] == CORRECT for f in fiches.values()):
-        p3 = f"La caisse couvre au moins la cible de {cible_t} de dépenses."
-    else:
-        sujet = "La caisse de chaque centre couvre" if plusieurs else "La caisse couvre"
-        p3 = f"{sujet} au plus {mois_txt(max(couv))} de dépenses, alors que la cible est de {cible_t}."
-    return [p1, p2, p3]
-
-
 # --- calcul unique -----------------------------------------------------------------
 
 def calculer(debut, fin, centres, aujourd_hui=None):
@@ -634,7 +609,7 @@ def calculer(debut, fin, centres, aujourd_hui=None):
     mois = mois_de(debut, fin)
     flux, detail, pieces, soldes, soldes_debut, mensuels, banque, rubriques, parametres = _lire(debut, fin, centres)
     params = _parametres(parametres, centres)
-    detail = _preparer_detail(detail, params)
+    detail = _preparer_detail(detail)
     tous = _flux_complets(flux, detail)
     tous["interne"] = tous["interne"].astype(bool)
     lignes = _lignes(rubriques)

@@ -2,8 +2,8 @@
 -- Tableau de bord direction (03/10/2026) : complement de la migration
 -- 2026-10-02_tableau_bord.sql (rien n'y est retire).
 --
--- 1. parametres_centre : cible de marge, cible de tresorerie (en mois de
---    charges) et mois du camp de vacances, modifiables par centre.
+-- 1. parametres_centre : cible de marge et cible de tresorerie (en mois de
+--    charges), modifiables par centre.
 -- 2. flux_tableau_bord() : memes flux qu'avant, avec en plus la date, le
 --    tiers, le libelle et le centre de contrepartie d'un transfert interne
 --    (pour ne pas compter deux fois un flux entre deux centres choisis).
@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS parametres_centre (
     -- Argent a garder en caisse, en mois de charges d'exploitation.
     cible_tresorerie_mois  numeric(4, 1) NOT NULL DEFAULT 2
                            CHECK (cible_tresorerie_mois >= 0),
-    -- Mois ou un frais d'eleve sans mois de cours cite est un frais de camp.
-    mois_camp              integer[] NOT NULL DEFAULT '{6,7,8}',
     updated_at             timestamptz NOT NULL DEFAULT now()
 );
 
@@ -92,3 +90,4 @@ LANGUAGE sql STABLE AS $$
     FROM fins f CROSS JOIN centres c
     WHERE c.code_centre = ANY(p_centres)
 $$;
+
