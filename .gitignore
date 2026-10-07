@@ -70,3 +70,9 @@ backup/app_avant_*.py
 
 # Copies de sauvegarde avant modification (23/09/2026) : restent sur le PC.
 backup/avant_modifs_*/
+
+# Copies de sauvegarde faites avant les modifications du tableau de bord
+# (28/09 au 03/10/2026) : locales, jamais versionnees.
+backup/avant_tableau_bord*/
+backup/avant_regles_rouge_*/
+backup/ancien_tableau_bord_*/

@@ -21,6 +21,7 @@ Usage :
     python import_historique.py --dry-run       # simule, n'ecrit rien, affiche le resume
 """
 import argparse
+import re
 import sys
 from datetime import date
 
@@ -76,10 +77,14 @@ def lire_lignes(chemin):
             date_, lib, deb, cred, _solde, lib_h, compte, tiers, conf, note = row
             if date_ is None:
                 continue
+            libelle_fichier = str(lib_h or lib or "").strip().upper()
+            compte_ = str(compte).strip() if compte else ""
             lignes.append({
                 "feuille": feuille, "position": i,
                 "date_piece": date_.date() if hasattr(date_, "date") else date_,
-                "libelle": str(lib_h or lib or "").strip().upper(),
+                "original": str(lib or "").strip().upper(),
+                "libelle_fichier": libelle_fichier,
+                "libelle": libelle_camp(str(lib or ""), libelle_fichier, compte_, float(deb or 0) > 0),
                 "debit": float(deb or 0), "credit": float(cred or 0),
                 "compte": str(compte).strip() if compte else "",
                 "tiers": str(tiers).strip() if tiers else "",
@@ -87,6 +92,39 @@ def lire_lignes(chemin):
                 "note": str(note or "").strip(),
             })
     return lignes
+
+
+# --- camp de vacances --------------------------------------------------------
+#
+# La colonne LIBELLE HARMONISE des brouillards 2026 a ramene les frais du
+# camp ("AVANCE FRAIS CV KABRE CHARLES/S1", "FRAIS CAMP VACANCES NACRO
+# KORINE/S2") a la forme des cours d'appui ("AVANCE FRAIS CA ..."). Le
+# tableau de bord ne pouvait plus les distinguer. Le libelle d'origine, lui,
+# le dit : on le relit pour remettre la marque du camp (07/10/2026).
+
+CAMP_DANS_ORIGINAL = re.compile(r"\bCV\b|CAMP(?!AGN)")
+
+
+def libelle_camp(original, libelle, compte, entree):
+    """Le libelle a enregistrer : celui du fichier, marque camp de vacances
+    quand le libelle d'origine parle du camp.
+
+    - encaissement d'un eleve (411, argent entre) : FRAIS CA devient FRAIS CV ;
+    - autre compte (401...) : CAMP en tete ;
+    - sortie d'argent sur le compte eleves : laissee telle quelle, ce n'est
+      pas un frais de camp mais une erreur de compte a corriger a la main
+      (voir outils/corriger_camp_2026.py, qui la signale)."""
+    libelle = str(libelle or "").strip().upper()
+    if not CAMP_DANS_ORIGINAL.search(str(original or "").upper()) or md.libelle_reconnu_camp(libelle):
+        return libelle
+    if compte.startswith("411"):
+        if not entree:
+            return libelle
+        nouveau = (re.sub(r"\bCA\b", "CV", libelle, count=1) if re.search(r"\bCA\b", libelle)
+                   else f"FRAIS CV {libelle}")
+    else:
+        nouveau = f"{md.MOT_CAMP} {libelle}"
+    return nouveau[:md.LIBELLE_MAX].rstrip()
 
 
 # --- import des lignes -------------------------------------------------------

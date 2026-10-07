@@ -842,3 +842,20 @@ shiny-chat-container {
   border-radius:0 var(--hk-rayon-champ) var(--hk-rayon-champ) 0; }
 .hk-oeil:hover { color:var(--hk-primaire); background:var(--hk-neutre-clair); }
 .hk-oeil:focus-visible { outline:2px solid var(--hk-primaire); outline-offset:-2px; }
+
+/* Choix court toujours visible (Activite : Cours d'appui / Camp de vacances,
+   07/10/2026) : deux boutons cote a cote, meme dessin que la bascule du
+   tableau de bord. L'asterisque n'est porte que par le libelle du champ. */
+.choix-segment .shiny-options-group { display:inline-flex; flex-wrap:wrap; background:var(--hk-carte);
+  border:1px solid var(--hk-bordure); border-radius:10px; padding:3px; gap:2px; }
+.choix-segment .radio-inline { margin:0; padding:0; }
+.choix-segment .shiny-options-group input { position:absolute; opacity:0; width:1px; height:1px; }
+.grille-saisie .choix-segment .shiny-options-group label::after { content:none; }
+.choix-segment .shiny-options-group label { display:block; margin:0; padding:7px 14px; border-radius:8px;
+  font-size:13.5px; font-weight:500; color:var(--hk-texte-doux); cursor:pointer; white-space:nowrap;
+  text-transform:none; letter-spacing:0; }
+.choix-segment .shiny-options-group label:has(input:checked) { background:var(--hk-primaire-clair);
+  color:var(--hk-primaire); font-weight:600; }
+.choix-segment .shiny-options-group label:has(input:focus-visible) { outline:2px solid var(--hk-primaire);
+  outline-offset:1px; }
+.choix-segment .shiny-input-container { display:flex; flex-direction:column; align-items:flex-start; }

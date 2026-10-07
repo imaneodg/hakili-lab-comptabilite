@@ -17,6 +17,7 @@
 # ---------------------------------------------------------------------------
 
 import json
+import logging
 
 import pandas as pd
 from shiny import module, reactive, render, req, ui
@@ -40,6 +41,8 @@ RETARDS = [("avance", "Payé d'avance", "#5B92DE", "#0F2344"), ("0", "Dans le mo
            ("1", "1 mois de retard", "#E3B341", "#0F2344"), ("2", "2 mois", "#D0700E", "#0F2344"),
            ("3+", "3 mois et plus", "#B42318", "#FFFFFF")]
 LISTE_MAX = 50  # operations affichees sous un controle de fiabilite
+
+logger = logging.getLogger("hakili.tableau_bord")
 
 
 # --- formats ------------------------------------------------------------------------
@@ -261,45 +264,90 @@ def _barre_retard(eleves):
 
 # --- tableaux ---------------------------------------------------------------------------
 
-def _ligne(libelle, valeurs, classe=""):
+def _ligne(libelle, valeurs, classe="", alertes=None):
+    """alertes : une classe CSS par cellule ("" = aucune), ou None."""
+    alertes = alertes or [""] * len(valeurs)
     return ui.tags.tr({"class": classe} if classe else {},
                       ui.tags.th({"scope": "row"}, libelle),
-                      *[ui.tags.td(v) for v in valeurs])
+                      *[ui.tags.td({"class": a} if a else {}, v) for v, a in zip(valeurs, alertes)])
 
 
-def _compte_resultat(tableau, totaux, mois, extra=()):
+def _alerte_negatif(v):
+    """Regle 2 : toute valeur negative en rouge."""
+    return "tbx-negatif" if not calc._nan(v) and v < 0 else ""
+
+
+def _alertes_salaires(tableau, totaux, colonnes, marge):
+    """Regle 1 : salaires au-dessus du plafond salarial (rouge + gras).
+    Sinon, la regle 2 s'applique a la cellule."""
+    vac = tableau[(tableau["rubrique"] == calc.SALAIRES) & (tableau["bloc"] == calc.CHARGE)][colonnes].sum()
+    alertes = []
+    for c in colonnes:
+        enc, cha = totaux["encaissements"][c], totaux["charges"][c]
+        if calc._nan(enc) or calc._nan(cha):
+            alertes.append("")
+            continue
+        enc, cha = float(enc), float(cha)
+        depasse = float(vac[c]) > calc.plafond_salarial(enc, cha, float(vac[c]), marge)
+        alertes.append("tbx-alerte-forte" if depasse else "")
+    return alertes
+
+
+def _compte_resultat(tableau, totaux, mois, extra=(), marge=None):
     """Le compte de resultat mensuel en encaissements. extra : lignes
-    supplementaires [(libelle, valeurs, classe)] apres le resultat."""
+    supplementaires [(libelle, valeurs, classe)] apres le resultat.
+    marge : la marge cible ; si elle est donnee, la ligne des salaires passe
+    en rouge gras quand elle depasse le plafond salarial."""
     colonnes = mois + ["Total"]
+    alertes_sal = _alertes_salaires(tableau, totaux, colonnes, marge) if marge is not None else None
     corps = []
     for bloc, titre, libelle_total in BLOCS:
         corps.append(ui.tags.tr({"class": "tbx-groupe"},
                                 ui.tags.th({"colspan": len(colonnes) + 1, "scope": "colgroup"}, titre)))
         for ligne in tableau[tableau["bloc"] == bloc].to_dict("records"):
-            corps.append(_ligne(ligne["libelle"], [_f(ligne[c]) for c in colonnes]))
+            alertes = [_alerte_negatif(ligne[c]) for c in colonnes]
+            if alertes_sal and ligne["rubrique"] == calc.SALAIRES and bloc == calc.CHARGE:
+                alertes = [f or a for f, a in zip(alertes_sal, alertes)]
+            corps.append(_ligne(ligne["libelle"], [_f(ligne[c]) for c in colonnes], alertes=alertes))
         cle = {calc.ENCAISSEMENT: "encaissements", calc.CHARGE: "charges", calc.HORS: "hors_exploitation"}[bloc]
-        corps.append(_ligne(libelle_total, [_f(totaux[cle][c]) for c in colonnes], "tbx-total"))
+        corps.append(_ligne(libelle_total, [_f(totaux[cle][c]) for c in colonnes], "tbx-total",
+                            [_alerte_negatif(totaux[cle][c]) for c in colonnes]))
         if bloc == calc.CHARGE:
             corps.append(_ligne("Résultat d'exploitation", [_f(totaux["resultat"][c]) for c in colonnes],
-                                "tbx-resultat"))
+                                "tbx-resultat", [_alerte_negatif(totaux["resultat"][c]) for c in colonnes]))
             corps.append(_ligne("en % des encaissements", [calc.pct(totaux["pct"][c]) for c in colonnes],
-                                "tbx-pct"))
+                                "tbx-pct", [_alerte_negatif(totaux["pct"][c]) for c in colonnes]))
             for libelle, valeurs, classe in extra:
                 corps.append(_ligne(libelle, valeurs, classe))
-    return ui.div({"class": "tbx-defile", "tabindex": "0"},
-                  ui.tags.table({"class": "tbx-table"},
-                                ui.tags.thead(ui.tags.tr(ui.tags.th({"scope": "col"}, "Poste"),
-                                                         *[ui.tags.th({"scope": "col"}, _mois(m)) for m in mois],
-                                                         ui.tags.th({"scope": "col"}, "Total"))),
-                                ui.tags.tbody(*corps)))
+    note = None
+    if alertes_sal is not None:
+        note = ui.p({"class": "tbx-notes-bas"},
+                    ui.span({"class": "tbx-alerte-forte"}, "En rouge gras"),
+                    f" : salaires au-dessus du plafond salarial (ce qui reste des encaissements après les "
+                    f"autres charges et une marge de {calc.pct(marge, 0)}). ",
+                    ui.span({"class": "tbx-negatif"}, "En rouge"), " : montant négatif.")
+    return ui.TagList(
+        ui.div({"class": "tbx-defile", "tabindex": "0"},
+               ui.tags.table({"class": "tbx-table"},
+                             ui.tags.thead(ui.tags.tr(ui.tags.th({"scope": "col"}, "Poste"),
+                                                      *[ui.tags.th({"scope": "col"}, _mois(m)) for m in mois],
+                                                      ui.tags.th({"scope": "col"}, "Total"))),
+                             ui.tags.tbody(*corps))),
+        note)
 
 
 def _table_simple(entetes, lignes, classe=""):
+    """lignes : tuples (libelle, valeur, ...) ; pour la table des forces, un
+    tuple de trois elements (libelle, valeur, classe de la ligne)."""
+    def rang(l):
+        attrs, valeurs = {}, l[1:]
+        if classe == "tbx-forces" and len(l) == 3:
+            attrs, valeurs = {"class": l[2]}, l[1:2]
+        return ui.tags.tr(attrs, ui.tags.th({"scope": "row"}, l[0]), *[ui.tags.td(v) for v in valeurs])
     return ui.div({"class": "tbx-defile", "tabindex": "0"},
                   ui.tags.table({"class": f"tbx-table {classe}".strip()},
                                 ui.tags.thead(ui.tags.tr(*[ui.tags.th({"scope": "col"}, e) for e in entetes])),
-                                ui.tags.tbody(*[ui.tags.tr(ui.tags.th({"scope": "row"}, l[0]),
-                                                           *[ui.tags.td(v) for v in l[1:]]) for l in lignes])))
+                                ui.tags.tbody(*[rang(l) for l in lignes])))
 
 
 # --- vue d'ensemble ---------------------------------------------------------------------
@@ -376,13 +424,21 @@ def _comparatif(ns, r, noms):
     def cellule(texte, niveau):
         return ui.div(ui.div({"class": "tbx-cmp-valeur"}, texte), _pastille(niveau))
 
-    def ligne(titre, sous, valeurs):
-        return ui.tags.tr(ui.tags.th({"scope": "row"}, ui.div({"class": "tbx-cmp-titre"}, titre),
-                                     ui.div({"class": "tbx-cmp-sous"}, sous)),
+    def ligne(titre, sous, valeurs, classe=""):
+        return ui.tags.tr({"class": classe} if classe else {},
+                          ui.tags.th({"scope": "row"}, ui.div({"class": "tbx-cmp-titre"}, titre),
+                                     ui.div({"class": "tbx-cmp-sous"}, sous) if sous else None),
                           *[ui.tags.td(v) for v in valeurs])
+
+    def detail(cle):
+        return [ui.div({"class": "tbx-cmp-valeur"}, f"{_f(fiches[c][cle])} F") for c in centres]
+    # Le camp n'apparait que si un des centres en a eu sur la periode.
+    camp = any(fiches[c]["camp"] for c in centres)
     lignes = [
         ligne("Argent reçu", "Encaissements d'exploitation de la période",
               [cellule(f"{_f(fiches[c]['encaissements'])} F", calc.NEUTRE) for c in centres]),
+        *([ligne("dont cours d'appui", "", detail("cours_appui"), "tbx-cmp-dont"),
+           ligne("dont camp de vacances", "", detail("camp"), "tbx-cmp-dont")] if camp else []),
         ligne("Bénéfice et marge", _cible_marge(centres, fiches),
               [cellule(f"{_f(fiches[c]['resultat'])} F, soit {calc.pct(fiches[c]['marge'])}",
                        fiches[c]["niveaux"]["marge"]) for c in centres]),
@@ -452,7 +508,8 @@ def _vue_ensemble(ns, r, noms):
                                ui.span({"class": "tbx-sous-titre"},
                                        "en FCFA, sans les flux entre les centres choisis"
                                        if plusieurs else "en FCFA")),
-                        _compte_resultat(r["tableau"], r["totaux"], r["mois"]))),
+                        _compte_resultat(r["tableau"], r["totaux"], r["mois"],
+                                         marge=r["ensemble"]["cible_marge"]))),
     )
 
 
@@ -460,9 +517,9 @@ def _vue_ensemble(ns, r, noms):
 
 def _onglet_resultat(f, mois):
     p = f["parametres"]
+    # Les salaires payes sont deja la ligne « Vacations et salaires » du
+    # tableau (en rouge gras quand ils depassent) : seul le plafond s'ajoute.
     lignes_salaires = [
-        ("Salaires payés", [_f(m.get("salaires")) if not m["vide"] else "-" for m in f["mensuel"]]
-         + [_f(f["salaires"])], "tbx-pct"),
         ("Plafond salarial", [_f(m.get("maximum")) if not m["vide"] else "-" for m in f["mensuel"]]
          + [_f(f["maximum_salaires"])], "tbx-pct"),
     ]
@@ -480,7 +537,8 @@ def _onglet_resultat(f, mois):
         _graphique_resultat(f),
         _deplier("Afficher le détail mois par mois",
                  ui.div({"class": "tbx-carte tbx-carte--tableau"},
-                        _compte_resultat(f["tableau"], f["totaux"], mois, lignes_salaires))),
+                        _compte_resultat(f["tableau"], f["totaux"], mois, lignes_salaires,
+                                         marge=p["cible_marge"]))),
     )
 
 
@@ -522,6 +580,9 @@ def _onglet_caisse(f, r):
         ("= Argent attendu en caisse", _f(f["caisse_attendue"])),
         ("Argent constaté en caisse", _f(f["argent_disponible"])),
         ("Écart", _f(f["ecart_caisse"])),
+        ("Capital de base visé", _f(f["cible_tresorerie"]), "tbx-forces-cible"),
+        ("Reste à constituer", _f(f["reste_a_constituer"])),
+        ("Disponible pour distribuer ou investir", _f(f["distribuable"])),
     ]
     detail_hors = f["tableau"][f["tableau"]["bloc"] == calc.HORS]
     hors = [(x["libelle"], _f(x["Total"])) for x in detail_hors.to_dict("records") if not calc._nan(x["Total"])]
@@ -625,7 +686,17 @@ def onglet():
                 ui.input_radio_buttons("vue", None, {"ensemble": "Vue d'ensemble", "fiche": "Fiche centre"},
                                        selected="ensemble", inline=True),
             ),
-            ui.panel_conditional("input.vue !== 'fiche'", ui.output_ui("ensemble")),
+            ui.panel_conditional(
+                "input.vue !== 'fiche'",
+                ui.output_ui("ensemble"),
+                # Les cibles servent a tous les indicateurs : rangees en bas,
+                # repliees, hors du rendu de la vue d'ensemble pour que la
+                # saisie ne soit jamais effacee par un recalcul.
+                ui.tags.details(
+                    {"class": "tbx-deplier tbx-reglages"},
+                    ui.tags.summary("Régler les cibles de chaque centre"),
+                    ui.div({"class": "tbx-deplier-corps"},
+                           ui.div({"class": "tbx-carte"}, ui.output_ui("reglages"))))),
             ui.panel_conditional(
                 "input.vue === 'fiche'",
                 ui.input_action_link("retour", "Retour à la vue d'ensemble", class_="tbx-lien tbx-retour"),
@@ -652,6 +723,9 @@ def serveur(input, output, session, autorise, actualiser):
     """autorise : calc reactif vrai pour le comptable. actualiser : appele
     dans le calcul pour le relancer a chaque nouvelle ecriture."""
 
+    # Incremente a chaque enregistrement des cibles : relance le calcul.
+    version_cibles = reactive.value(0)
+
     @reactive.calc
     def noms():
         req(autorise())
@@ -668,6 +742,7 @@ def serveur(input, output, session, autorise, actualiser):
     def resultat():
         req(autorise())
         actualiser()
+        version_cibles()
         debut, fin = input.dates() or (None, None)
         if not debut or not fin:
             return {"erreur": "Choisissez une date de début et une date de fin."}
@@ -701,6 +776,67 @@ def serveur(input, output, session, autorise, actualiser):
     @reactive.event(input.retour)
     def _retour():
         ui.update_radio_buttons("vue", selected="ensemble")
+
+    @render.ui
+    def reglages():
+        req(autorise())
+        version_cibles()
+        n = noms()
+        if not n:
+            return _message("Aucun centre n'a encore de caisse dans l'application.")
+        par = calc.parametres_centres(list(n))
+        marge_max = calc.MARGE_MAX * 100
+        lignes = [ui.tags.tr(
+            ui.tags.th({"scope": "row"}, nom),
+            ui.tags.td(ui.input_numeric(f"cm_{code}", f"Marge visée, {nom}",
+                                        value=round(par[code]["cible_marge"] * 100, 1),
+                                        min=0, max=marge_max, step=1, width="110px")),
+            ui.tags.td(ui.input_numeric(f"ct_{code}", f"Capital de base, {nom}",
+                                        value=par[code]["cible_tresorerie_mois"],
+                                        min=0, max=calc.TRESORERIE_MOIS_MAX, step=0.5, width="110px")),
+        ) for code, nom in n.items()]
+        return ui.TagList(
+            ui.p({"class": "tbx-carte-sous"},
+                 "La marge visée fixe le plafond salarial. Le capital de base est l'argent à garder en "
+                 "caisse, compté en mois de charges d'exploitation."),
+            ui.div({"class": "tbx-defile", "tabindex": "0"},
+                   ui.tags.table({"class": "tbx-table tbx-cibles"},
+                                 ui.tags.thead(ui.tags.tr(ui.tags.th({"scope": "col"}, "Centre"),
+                                                          ui.tags.th({"scope": "col"}, "Marge visée (%)"),
+                                                          ui.tags.th({"scope": "col"}, "Capital de base (mois)"))),
+                                 ui.tags.tbody(*lignes))),
+            ui.input_action_button("enregistrer_cibles", "Enregistrer les cibles",
+                                   class_="btn btn-primary btn-sm tbx-bouton"),
+        )
+
+    @reactive.effect
+    @reactive.event(input.enregistrer_cibles)
+    def _enregistrer_cibles():
+        req(autorise())
+        n = noms()
+        valeurs = {}
+        for code, nom in n.items():
+            try:
+                marge, mois = input[f"cm_{code}"](), input[f"ct_{code}"]()
+            except Exception:
+                continue  # centre apparu depuis l'affichage : il garde ses cibles
+            try:
+                calc.verifier_parametres(marge, mois)
+            except ValueError as e:
+                ui.notification_show(f"{nom} : {e}", type="error", duration=8)
+                return
+            valeurs[code] = (marge, mois)
+        if not valeurs:
+            return
+        try:
+            calc.enregistrer_parametres(valeurs)
+        except Exception:
+            logger.exception("Enregistrement des cibles du tableau de bord en echec")
+            ui.notification_show("Les cibles n'ont pas pu être enregistrées. Réessayez.", type="error")
+            return
+        logger.info("Cibles du tableau de bord enregistrees : %s", valeurs)
+        version_cibles.set(version_cibles() + 1)
+        ui.notification_show("Cibles enregistrées : les indicateurs sont recalculés.", type="message")
 
     @render.text
     def sous_titre():

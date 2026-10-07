@@ -1764,8 +1764,23 @@ def server(input, output, session):
                 widgets.append(ui.input_select(id_, ch["l"], choices={"oui": "Oui", "non": "Non"},
                                                 selected=defaut or "non"))
             elif t == "choix":
-                widgets.append(ui.input_select(id_, ch["l"], choices=ch["options"],
-                                                selected=defaut or next(iter(ch["options"]))))
+                choisi = defaut if defaut in ch["options"] else next(iter(ch["options"]))
+                # "garde" : la valeur choisie pour la piece precedente reste
+                # proposee (lue sans dependance, pour ne pas reconstruire le
+                # formulaire a chaque clic). Une correction impose toujours
+                # la valeur de la piece corrigee - et, pour une piece
+                # enregistree avant que le champ existe, la premiere option.
+                if ch.get("garde") and not pre:
+                    with reactive.isolate():
+                        actuel = get_input(id_)
+                    if actuel in ch["options"]:
+                        choisi = actuel
+                if ch.get("affichage") == "boutons":
+                    widgets.append(ui.div({"class": "choix-segment"},
+                                          ui.input_radio_buttons(id_, ch["l"], choices=ch["options"],
+                                                                 selected=choisi, inline=True)))
+                else:
+                    widgets.append(ui.input_select(id_, ch["l"], choices=ch["options"], selected=choisi))
             elif t == "centre":
                 # Liste tiree du referentiel, jamais ecrite en dur : un centre
                 # ajoute ou desactive plus tard apparait ou disparait tout
@@ -2126,8 +2141,11 @@ def server(input, output, session):
                 ui.update_selectize(id_, selected="")
             elif ch["t"] == "texte":
                 ui.update_text(id_, value="")
-            elif ch["t"] == "choix" and ch.get("options"):
-                ui.update_select(id_, selected=next(iter(ch["options"])))
+            elif ch["t"] == "choix" and ch.get("options") and not ch.get("garde"):
+                if ch.get("affichage") == "boutons":
+                    ui.update_radio_buttons(id_, selected=next(iter(ch["options"])))
+                else:
+                    ui.update_select(id_, selected=next(iter(ch["options"])))
             elif ch["t"] == "centre":
                 # Rien a remettre a zero : la liste est reconstruite par
                 # m_champs a chaque changement de modele, et son premier

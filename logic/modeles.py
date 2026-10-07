@@ -61,6 +61,26 @@ LIBELLES_NATURE_CA = {
     "solde": "SOLDE CA",
 }
 
+# Camp de vacances (07/10/2026). Le camp est une activite a part : il doit se
+# lire a part dans le tableau de bord, sans quoi ses recettes de juin a aout
+# passent pour des cours d'appui et faussent les eleves payants, le frais
+# moyen, le seuil de rentabilite et les retards de paiement. Le tableau de
+# bord ne le reconnait qu'au libelle (jamais au mois : un cours de juillet
+# reste un cours). "CV" est le mot des caissieres dans leurs brouillards
+# ("AVANCE FRAIS CV KABRE CHARLES/S1").
+LIBELLES_NATURE_CV = {
+    "frais": "FRAIS CV",
+    "avance": "AVANCE CV",
+    "solde": "SOLDE CV",
+}
+ACTIVITE_CAMP = "camp"
+ACTIVITES_ENCAISSEMENT = {"cours": "Cours d'appui", ACTIVITE_CAMP: "Camp de vacances"}
+ACTIVITES_DEPENSE = {"cours": "Cours d'appui et fonctionnement", ACTIVITE_CAMP: "Camp de vacances"}
+# Mot ajoute en tete du libelle d'une depense du camp. Il est reconnu par la
+# regle "camp" de classement_comptes (tableau de bord) et survit a toute
+# troncature : il passe avant le libelle tape.
+MOT_CAMP = "CAMP"
+
 # Meme mecanique pour le reglement d'un fournisseur (25/09/2026) : un
 # reglement peut couvrir plusieurs mois (vacations, loyer, gardiennage...),
 # payes au mois, d'avance, ou pour solder un mois deja entame. "PAIEMENT"
@@ -229,7 +249,40 @@ def _mois_en_libelle(liste):
     return "-".join(ABREVIATIONS_MOIS[m] for m in liste)
 
 
-def _libelle_frais_ca(nature, mois, nom=""):
+def est_camp(v):
+    """Vrai si l'operation saisie concerne le camp de vacances."""
+    return str(un(v.get("activite"), "")).strip() == ACTIVITE_CAMP
+
+
+# Les motifs de la regle "camp" du tableau de bord (classement_comptes,
+# migration 2026-10-07). Un libelle qui en porte un est compte dans le camp.
+MOTIFS_CAMP = ("CAMP ", "FRAIS CV", "AVANCE CV", "SOLDE CV")
+
+
+def libelle_reconnu_camp(libelle):
+    """Meme test que flux_tableau_bord() : un motif du camp present dans le
+    libelle (un espace est ajoute en fin de libelle, comme en base)."""
+    texte = str(un(libelle, "")).upper() + " "
+    return any(m in texte for m in MOTIFS_CAMP)
+
+
+def porte_mot_camp(libelle):
+    """Meme test que la base (classement_comptes, motif "CAMP ") : le mot
+    CAMP seul, suivi d'un espace ou en fin de libelle. "CAMPAGNE" n'est pas
+    le camp."""
+    return f"{MOT_CAMP} " in str(un(libelle, "")).upper() + " "
+
+
+def _avec_mot_camp(libelle, camp):
+    """Le libelle d'une depense, precede de CAMP quand elle concerne le camp
+    (une seule fois, meme si la caisse l'a deja tape)."""
+    lib = " ".join(str(un(libelle, "")).split())
+    if not camp or porte_mot_camp(lib):
+        return lib
+    return f"{MOT_CAMP} {lib}".strip()
+
+
+def _libelle_frais_ca(nature, mois, nom="", camp=False):
     """Libelle d'une ligne de reglement du formulaire "encaissement" :
 
         FRAIS CA OCT-NOV-DEC - OUEDRAOGO ABDOUL AZIZ
@@ -246,7 +299,8 @@ def _libelle_frais_ca(nature, mois, nom=""):
     quelle operation ni de quelle periode il s'agit. Meme raisonnement que
     _libelle_avec_mois, qui protege deja son suffixe "/MOIS"."""
     liste = mois_tries(mois)
-    base = LIBELLES_NATURE_CA.get(nature, LIBELLES_NATURE_CA["frais"])
+    natures = LIBELLES_NATURE_CV if camp else LIBELLES_NATURE_CA
+    base = natures.get(nature, natures["frais"])
     tete = f"{base} {_mois_en_libelle(liste)}" if liste else base
     nom = str(un(nom, "")).strip()
     if not nom:
@@ -255,7 +309,7 @@ def _libelle_frais_ca(nature, mois, nom=""):
     return f"{tete} - {nom[:place]}" if place > 0 else tete
 
 
-def _libelle_reglement_fournisseur(nature, libelle, mois, nom=""):
+def _libelle_reglement_fournisseur(nature, libelle, mois, nom="", camp=False):
     """Libelle d'une ligne 401 du reglement d'un fournisseur :
 
         AVANCE ETAT VACATION OCT-NOV-DEC - KABORE BERNARD
@@ -277,9 +331,14 @@ def _libelle_reglement_fournisseur(nature, libelle, mois, nom=""):
     lib = " ".join(str(un(libelle, "")).upper().replace(" - ", " ").split())
     if lib == base or lib.startswith(base + " "):
         lib = lib[len(base):].strip()
+    # Le mot CAMP passe juste apres la nature, avant le libelle tape : il ne
+    # peut donc jamais etre coupe par la troncature ci-dessous.
+    lib = _avec_mot_camp(lib, camp)
     fixe = len(base) + (len(mois_txt) + 1 if mois_txt else 0)
     place_lib = LIBELLE_MAX - fixe - 1               # l'espace avant le libelle
     lib = lib[:place_lib].rstrip() if place_lib > 0 else ""
+    if camp and not porte_mot_camp(lib) and place_lib >= len(MOT_CAMP):
+        lib = MOT_CAMP          # douze mois coches : il ne reste que la place du mot
     tete = " ".join(x for x in (base, lib, mois_txt) if x)
     nom = str(un(nom, "")).strip()
     place = LIBELLE_MAX - len(tete) - 3              # la place prise par " - "
@@ -359,6 +418,7 @@ COMPTE_VIREMENTS_FONDS = "585000"
 CENTRE_DESTINATAIRE_PAR_DEFAUT = "SIA"
 
 
+
 MODELES = [
 
     {
@@ -371,11 +431,17 @@ MODELES = [
         # exactement comme l'ancien formulaire dedie.
         "id": "encaissement",
         "titre": "Encaissement de frais de scolarite",
-        "aide": "Reglement eleve : frais du mois, avance, ou rattrapage d'un mois passe",
+        "aide": "Reglement eleve : cours d'appui ou camp de vacances, frais du mois, avance ou rattrapage",
         "journal": "CP",
         "champs": [
             {"n": "tiers", "l": "Eleve (compte 411)", "t": "tiers", "pref": "411", "collectif": "411000",
              "historique": True},
+            # "garde" : le choix reste d'une piece a l'autre. Pendant le camp,
+            # la caissiere enchaine les paiements du camp ; remettre "Cours
+            # d'appui" apres chaque piece l'obligerait a y penser a chaque
+            # fois. "boutons" : le choix reste visible, pas cache dans une liste.
+            {"n": "activite", "l": "Activite", "t": "choix", "options": ACTIVITES_ENCAISSEMENT,
+             "affichage": "boutons", "garde": True},
             {"n": "montant", "l": "Montant total recu", "t": "montant"},
             {"n": "repartition", "l": "Repartition", "t": "repartition",
              "natures": NATURES_ENCAISSEMENT},
@@ -384,7 +450,7 @@ MODELES = [
         # mois ici, une seule ligne ne peut pas resumer plusieurs mois et
         # natures a la fois - ils restent precises sur chaque ligne 411. Meme
         # forme courte que celles-ci, pour que la piece se lise d'un bloc.
-        "libelle": lambda v: f"FRAIS CA - {v.get('tiers_nom', '')}",
+        "libelle": lambda v: f"{'FRAIS CV' if est_camp(v) else 'FRAIS CA'} - {v.get('tiers_nom', '')}",
         "lignes": lambda v, cc: _lignes_encaissement(v, cc),
     },
 
@@ -555,12 +621,13 @@ MODELES = [
         "champs": [
             {"n": "tiers", "l": "Fournisseur (compte 401)", "t": "tiers", "pref": "401", "collectif": "401000"},
             {"n": "libelle", "l": "Libelle de l'operation", "t": "libelle"},
+            {"n": "activite", "l": "Activite", "t": "choix", "options": ACTIVITES_DEPENSE},
             {"n": "montant", "l": "Montant paye", "t": "montant"},
             {"n": "repartition", "l": "Repartition", "t": "repartition",
              "natures": NATURES_FOURNISSEUR},
             {"n": "timbre", "l": "Timbre (646200)", "t": "montant", "defaut": 0},
         ],
-        "libelle": lambda v: v.get("libelle", ""),
+        "libelle": lambda v: _avec_mot_camp(v.get("libelle", ""), est_camp(v)),
         "lignes": lambda v, cc: _lignes_fournisseur(v, cc),
     },
 
@@ -579,10 +646,12 @@ MODELES = [
             # les confondre, exactement comme 411000 pour les eleves.
             {"n": "personnel", "l": "Beneficiaire (professeur, vacataire, employe)",
              "t": "tiers", "pref": "422", "collectif": "422000"},
+            {"n": "activite", "l": "Activite", "t": "choix", "options": ACTIVITES_DEPENSE},
             {"n": "mois", "l": "Mois concerne", "t": "mois"},
             {"n": "montant", "l": "Montant paye", "t": "montant"},
         ],
-        "libelle": lambda v: f"REMUNERATION {v.get('mois', '')}/{v.get('personnel_nom', '')}",
+        "libelle": lambda v: (f"REMUNERATION{' ' + MOT_CAMP if est_camp(v) else ''} "
+                              f"{v.get('mois', '')}/{v.get('personnel_nom', '')}"),
         "lignes": lambda v, cc: _df(
             ligne("422000", v["lib"], debit=v["montant"], code_tiers=v.get("personnel", "")),
             ligne(cc, v["lib"], credit=v["montant"]),
@@ -608,11 +677,12 @@ MODELES = [
         "champs": [
             {"n": "tiers", "l": "Fournisseur (compte 401)", "t": "tiers", "pref": "401", "collectif": "401000"},
             {"n": "libelle", "l": "Libelle de l'operation", "t": "libelle"},
+            {"n": "activite", "l": "Activite", "t": "choix", "options": ACTIVITES_DEPENSE},
             {"n": "montant", "l": "Montant paye", "t": "montant"},
             {"n": "repartition", "l": "Repartition", "t": "repartition",
              "natures": NATURES_FOURNISSEUR},
         ],
-        "libelle": lambda v: v.get("libelle", ""),
+        "libelle": lambda v: _avec_mot_camp(v.get("libelle", ""), est_camp(v)),
         "lignes": lambda v, cc: _lignes_fournisseur(v, cc),
     },
 
@@ -843,7 +913,7 @@ def _lignes_encaissement(v, cc):
     for row in repartition:
         montant = float(un(row.get("montant"), 0) or 0)
         libelle = _libelle_frais_ca(row.get("nature"), row.get("mois"),
-                                    v.get("tiers_nom", ""))
+                                    v.get("tiers_nom", ""), camp=est_camp(v))
         lignes_411.append(ligne("411000", libelle, credit=montant, code_tiers=v.get("tiers", "")))
     if not lignes_411:
         return None
@@ -901,7 +971,8 @@ def _lignes_fournisseur(v, cc):
     lignes_401 = []
     for row in repartition:
         libelle = _libelle_reglement_fournisseur(row.get("nature"), v.get("libelle", ""),
-                                                 row.get("mois"), v.get("tiers_nom", ""))
+                                                 row.get("mois"), v.get("tiers_nom", ""),
+                                                 camp=est_camp(v))
         lignes_401.append(ligne("401000", libelle, debit=float(un(row.get("montant"), 0) or 0),
                                 code_tiers=v.get("tiers", "")))
     if not lignes_401:

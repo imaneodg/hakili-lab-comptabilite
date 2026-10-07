@@ -43,6 +43,9 @@ CORRECT, SURVEILLER, ATTENTION, NEUTRE = "correct", "surveiller", "attention", "
 ORDRE_NIVEAU = {ATTENTION: 0, SURVEILLER: 1, NEUTRE: 2, CORRECT: 3}
 
 PARAMETRES_DEFAUT = {"cible_marge": 0.15, "cible_tresorerie_mois": 2.0}
+# Bornes acceptees a la saisie des cibles (onglet Tableau de bord). Au-dela,
+# c'est une faute de frappe (150 au lieu de 15) plutot qu'un objectif.
+MARGE_MAX, TRESORERIE_MOIS_MAX = 0.5, 12.0
 
 
 def _nan(v):
@@ -99,13 +102,14 @@ def _lire(debut, fin, centres):
         FROM flux_tableau_bord(%s, %s, %s)
         WHERE rubrique NOT IN (%s, %s, %s)
         GROUP BY 1, 2, 3, 4, 5""", (centres, debut, fin, centres, COURS, CAMP, SALAIRES))
-    # camp : le libelle porte un des mots des regles du camp (CAMP, FRAIS CV...),
-    # pour reconnaitre aussi les vacations du camp.
+    # camp : le libelle porte un des mots des regles du camp (« CAMP »,
+    # FRAIS CV...), pour reconnaitre aussi les vacations du camp. Meme
+    # comparaison que flux_tableau_bord() (espace ajoute en fin de libelle).
     detail = dl._lire_df("""
         SELECT centre, mois, rubrique, sens, false AS interne, date_piece, code_tiers, libelle,
                EXISTS (SELECT 1 FROM classement_comptes c, unnest(c.motifs) m
                        WHERE c.rubrique = %s
-                         AND tb_normaliser(f.libelle) LIKE '%%' || tb_normaliser(m) || '%%') AS camp,
+                         AND tb_normaliser(f.libelle) || ' ' LIKE '%%' || tb_normaliser(m) || '%%') AS camp,
                sum(montant)::float AS montant
         FROM flux_tableau_bord(%s, %s, %s) f
         WHERE rubrique IN (%s, %s, %s)
@@ -133,6 +137,60 @@ def _lire(debut, fin, centres):
     rubriques = dl._lire_df("SELECT * FROM rubriques_tableau ORDER BY ordre")
     parametres = dl._lire_df("SELECT * FROM parametres_centre WHERE centre = ANY(%s)", (centres,))
     return flux, detail, pieces, soldes, soldes_debut, mensuels, banque, rubriques, parametres
+
+
+def plafond_salarial(encaissements, charges, salaires, marge):
+    """Le plafond salarial : ce qu'on peut payer en salaires en gardant la
+    marge cible. Encaissements, moins les autres charges d'exploitation,
+    moins la marge visee. Seule definition de l'application : la fiche, le
+    graphique et le rouge du compte de resultat l'utilisent tous."""
+    return encaissements - (charges - salaires) - marge * encaissements
+
+
+def parametres_centres(centres):
+    """{centre: {"cible_marge", "cible_tresorerie_mois"}}, valeurs par defaut
+    pour un centre sans ligne dans parametres_centre."""
+    centres = list(centres)
+    return _parametres(dl._lire_df("SELECT * FROM parametres_centre WHERE centre = ANY(%s)", (centres,)),
+                       centres)
+
+
+def verifier_parametres(marge_pct, tresorerie_mois):
+    """(marge, mois) prets a enregistrer, ou ValueError avec un message pour
+    l'utilisateur. marge_pct : en pourcentage (15 pour 15 %)."""
+    try:
+        marge, mois = float(marge_pct) / 100, float(tresorerie_mois)
+    except (TypeError, ValueError):
+        raise ValueError("Indiquez une marge et un capital de base chiffrés.")
+    if math.isnan(marge) or math.isnan(mois):
+        raise ValueError("Indiquez une marge et un capital de base chiffrés.")
+    if not 0 <= marge <= MARGE_MAX:
+        raise ValueError(f"La marge visée doit être comprise entre 0 et {MARGE_MAX * 100:.0f} %.")
+    if not 0 <= mois <= TRESORERIE_MOIS_MAX:
+        raise ValueError(f"Le capital de base doit être compris entre 0 et {TRESORERIE_MOIS_MAX:.0f} mois.")
+    return round(marge, 4), round(mois, 1)
+
+
+def enregistrer_parametres(valeurs):
+    """valeurs : {centre: (marge_pct, tresorerie_mois)}. Tout est verifie
+    avant d'ecrire, puis ecrit dans une seule transaction : soit toutes les
+    cibles changent, soit aucune. Le controle d'acces est fait par l'appelant."""
+    propres = {}
+    for centre, (marge_pct, mois) in valeurs.items():
+        try:
+            propres[centre] = verifier_parametres(marge_pct, mois)
+        except ValueError as e:
+            raise ValueError(f"{centre} : {e}") from None
+    with dl._connexion() as c, c.cursor() as cur:
+        for centre, (marge, mois) in propres.items():
+            cur.execute("""
+                INSERT INTO parametres_centre (centre, cible_marge, cible_tresorerie_mois, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (centre) DO UPDATE
+                SET cible_marge = EXCLUDED.cible_marge,
+                    cible_tresorerie_mois = EXCLUDED.cible_tresorerie_mois, updated_at = now()""",
+                        (centre, marge, mois))
+    return propres
 
 
 def _parametres(parametres, centres):
@@ -220,6 +278,12 @@ def _tableau(flux, lignes, mois):
     return pd.DataFrame(rangs, columns=["libelle", "rubrique", "bloc"] + colonnes)
 
 
+def _total_rubrique(tableau, rubrique, bloc):
+    """Total de la periode d'une rubrique (0 si elle n'a aucun mouvement)."""
+    t = tableau[(tableau["rubrique"] == rubrique) & (tableau["bloc"] == bloc)]["Total"]
+    return float(t.sum()) if len(t) else 0.0
+
+
 def _somme(tableau, bloc, colonnes):
     """Somme d'un bloc, colonne par colonne ; NaN si le bloc est vide ce mois."""
     return tableau[tableau["bloc"] == bloc][colonnes].sum(min_count=1)
@@ -259,7 +323,7 @@ def _mensuel(flux, lignes, mois, cible_marge):
         c = _chiffres(fm, lignes)
         salaires = sum(float(_valeur_affichee(_de_la_ligne(fm, l), CHARGE).sum()) for l in lignes_salaires)
         camp = float(fm[(fm["rubrique"] == CAMP) & (fm["sens"] == "entree")]["montant"].sum())
-        maximum = c["encaissements"] - (c["charges"] - salaires) - cible_marge * c["encaissements"]
+        maximum = plafond_salarial(c["encaissements"], c["charges"], salaires, cible_marge)
         rangs.append({"mois": m, "vide": False, "encaissements": c["encaissements"],
                       "charges": c["charges"], "resultat": c["resultat"], "salaires": salaires,
                       "maximum": maximum, "camp": camp,
@@ -402,6 +466,11 @@ def _fiche(c, flux, detail, lignes, mois, fin, params, soldes, soldes_debut, men
         "vers_banque": vers_banque,
         "caisse_attendue": attendu,
         "ecart_caisse": disponible - attendu,
+        # Forces 3 et 4 : le capital de base se constitue avant toute
+        # distribution. Seul ce qui le depasse est disponible pour distribuer
+        # ou investir.
+        "reste_a_constituer": float("nan") if _nan(cible_caisse) else max(0.0, cible_caisse - disponible),
+        "distribuable": float("nan") if _nan(cible_caisse) else max(0.0, disponible - cible_caisse),
         "eleves": eleves,
         "seuil_eleves": seuil,
         "niveaux": {
@@ -629,6 +698,8 @@ def calculer(debut, fin, centres, aujourd_hui=None):
         fiche["contribution_mois"] = sorted(set(fc[(fc["rubrique"] == CONTRIBUTION) & (fc["sens"] == "sortie")]["mois"]))
         fiche["tableau"] = _tableau(fc, lignes, mois)
         fiche["totaux"] = _totaux(fiche["tableau"], mois)
+        fiche["cours_appui"] = _total_rubrique(fiche["tableau"], COURS, ENCAISSEMENT)
+        fiche["camp"] = _total_rubrique(fiche["tableau"], CAMP, ENCAISSEMENT)
         fiche["non_validees"] = int(pieces[pieces["centre"] == c]["non_validees"].sum())
         fiche["attente"] = float(attente[attente["centre"] == c]["montant"].sum())
         fiab[c]["niveaux"] = _niveaux_fiabilite(fiab[c], fiche)

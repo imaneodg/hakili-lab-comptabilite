@@ -90,6 +90,9 @@
 .tbx-detail { font-size:11.5px; color:var(--tbx-doux); margin-top:2px; }
 .tbx-positif { color:var(--tbx-vert); }
 .tbx-negatif { color:var(--tbx-rouge); }
+/* Compte de resultat : rouge sur negatif, rouge gras sur salaires au-dessus du plafond. */
+.tbx-table td.tbx-negatif { color:var(--tbx-rouge); }
+.tbx-alerte-forte, .tbx-table td.tbx-alerte-forte { color:var(--tbx-rouge); font-weight:700; }
 .tbx-notes { margin-top:12px; padding-top:8px; border-top:1px solid var(--tbx-douce);
   font-size:12px; color:var(--tbx-doux); }
 .tbx-bandeaux-banque { display:flex; flex-wrap:wrap; gap:14px; }
@@ -198,8 +201,8 @@
   background:var(--tbx-carte); text-align:left; font-weight:400; min-width:200px; }
 .tbx-table thead th:first-child { background:var(--hk-tableau-entete); }
 .tbx-table thead th:last-child, .tbx-table td:last-child { font-weight:600; }
-.tbx-table:not(.tbx-cmp):not(.tbx-ops):not(.tbx-forces) thead th:last-child,
-.tbx-table:not(.tbx-cmp):not(.tbx-ops):not(.tbx-forces) td:last-child { border-left:1px solid var(--tbx-bordure); }
+.tbx-table:not(.tbx-cmp):not(.tbx-ops):not(.tbx-forces):not(.tbx-cibles) thead th:last-child,
+.tbx-table:not(.tbx-cmp):not(.tbx-ops):not(.tbx-forces):not(.tbx-cibles) td:last-child { border-left:1px solid var(--tbx-bordure); }
 .tbx-groupe th { position:sticky; left:0; text-align:left; color:var(--tbx-bleu); font-size:12px;
   font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding-top:16px; background:var(--tbx-carte); }
 .tbx-total th, .tbx-total td { font-weight:600; border-top:1px solid var(--tbx-bordure); }
@@ -217,6 +220,11 @@
 .tbx-cmp-titre { font-weight:600; font-size:13.5px; }
 .tbx-cmp-sous { font-size:12px; color:var(--tbx-doux); }
 .tbx-cmp-valeur { font-weight:600; margin-bottom:4px; }
+/* Lignes « dont » sous l'argent recu : plus discretes, sans pastille. */
+.tbx-cmp tr.tbx-cmp-dont th[scope="row"], .tbx-cmp tr.tbx-cmp-dont td { padding-top:4px; padding-bottom:4px; }
+.tbx-cmp tr.tbx-cmp-dont th[scope="row"] { padding-left:30px; }
+.tbx-cmp tr.tbx-cmp-dont .tbx-cmp-titre { font-weight:400; color:var(--tbx-doux); }
+.tbx-cmp tr.tbx-cmp-dont .tbx-cmp-valeur { font-weight:400; color:var(--tbx-doux); margin-bottom:0; }
 
 /* Controles de fiabilite. */
 .tbx-controle { padding:12px 18px; border-bottom:1px solid var(--tbx-douce); }
@@ -229,6 +237,18 @@
 .tbx-ops td:last-child { text-align:right; white-space:nowrap; }
 .tbx-ops th[scope="row"] { min-width:90px; }
 .tbx-forces th[scope="row"] { white-space:normal; min-width:0; }
+.tbx-forces tr.tbx-forces-cible th, .tbx-forces tr.tbx-forces-cible td { border-top:1px solid var(--tbx-bordure); }
+
+/* Reglage des cibles : un champ par cellule, libelle lu par les lecteurs
+   d'ecran seulement (l'en-tete de colonne le dit deja a l'ecran). */
+.tbx-reglages { margin-top:4px; }
+.tbx-cibles th[scope="row"] { min-width:140px; vertical-align:middle; }
+.tbx-cibles td { text-align:left; padding:6px 10px; }
+.tbx-cibles thead th { text-align:left; }
+.tbx-cibles .form-group, .tbx-cibles .shiny-input-container { margin:0; }
+.tbx-cibles label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0);
+  white-space:nowrap; }
+.tbx-bouton { margin-top:12px; }
 
 /* Telephone. */
 @media (max-width:700px) {
