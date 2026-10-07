@@ -26,7 +26,8 @@ RACINE = Path(__file__).resolve().parent.parent
 MIGRATIONS = [RACINE / "sql" / "migrations" / "2026-10-02_tableau_bord.sql",
               RACINE / "sql" / "migrations" / "2026-10-03_tableau_bord_direction.sql",
               RACINE / "sql" / "migrations" / "2026-10-03b_tableau_bord_equipement_camp.sql",
-              RACINE / "sql" / "migrations" / "2026-10-07_camp_de_vacances.sql"]
+              RACINE / "sql" / "migrations" / "2026-10-07_camp_de_vacances.sql",
+              RACINE / "sql" / "migrations" / "2026-10-07b_motif_transfert.sql"]
 AUJOURD_HUI = date(2099, 12, 31)  # les pieces de test sont datees de 2099
 PREFIXE = "TBTEST-"
 DEBUT, FIN = date(2099, 3, 1), date(2099, 4, 30)

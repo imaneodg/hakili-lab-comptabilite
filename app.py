@@ -1921,6 +1921,11 @@ def server(input, output, session):
     def m_apercu():
         op = operation()
         if op is None:
+            # Le motif d'un transfert est le seul champ obligatoire sans valeur
+            # par defaut : le dire, plutot que de laisser chercher ce qui manque.
+            if input.m_modele() == "transfert_interne" and not get_input("ch_motif"):
+                return ui.div({"class": "ruban att"},
+                              "Choisissez le motif du transfert : l'ecriture se construit ici.")
             return ui.div({"class": "ruban att"}, "Renseignez l'operation : l'ecriture se construit ici.")
         # Meme correctif que valeurs() ci-dessus : ne pas rendre m_apercu()
         # dependant de _disque() (2 s), sinon tout l'apercu "Ecriture

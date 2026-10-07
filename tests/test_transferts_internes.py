@@ -128,7 +128,7 @@ def test_une_piece_de_transfert_est_reconnue_comme_telle(ref):
 def test_le_donateur_credite_sa_caisse(ref):
     lignes = md.construire_lignes("transfert_interne", {
         "mon_centre": "PIS", "centre_donateur": "PIS", "centre_destinataire": "SIA",
-        "montant": 50000}, "CP", ref)
+        "montant": 50000, "motif": "contribution"}, "CP", ref)
     assert lignes.loc[lignes["compte"] == VF, "debit"].iloc[0] == 50000
     assert lignes.loc[lignes["compte"] == "571100", "credit"].iloc[0] == 50000
 
@@ -136,7 +136,7 @@ def test_le_donateur_credite_sa_caisse(ref):
 def test_le_destinataire_debite_sa_caisse(ref):
     lignes = md.construire_lignes("transfert_interne", {
         "mon_centre": "SIA", "centre_donateur": "PIS", "centre_destinataire": "SIA",
-        "montant": 50000}, "CP", ref)
+        "montant": 50000, "motif": "contribution"}, "CP", ref)
     assert lignes.loc[lignes["compte"] == "571100", "debit"].iloc[0] == 50000
     assert lignes.loc[lignes["compte"] == VF, "credit"].iloc[0] == 50000
 
@@ -144,7 +144,8 @@ def test_le_destinataire_debite_sa_caisse(ref):
 def test_la_meme_saisie_donne_deux_ecritures_inverses(ref):
     """Deux caissiers, la meme description de l'operation, deux ecritures
     opposees - sans qu'aucun des deux n'ait eu a choisir un "sens"."""
-    base = {"centre_donateur": "PIS", "centre_destinataire": "SIA", "montant": 50000}
+    base = {"centre_donateur": "PIS", "centre_destinataire": "SIA", "montant": 50000,
+            "motif": "contribution"}
     a = md.construire_lignes("transfert_interne", {**base, "mon_centre": "PIS"}, "CP", ref)
     b = md.construire_lignes("transfert_interne", {**base, "mon_centre": "SIA"}, "CP", ref)
     assert a.loc[a["compte"] == VF, "debit"].iloc[0] == b.loc[b["compte"] == VF, "credit"].iloc[0]
@@ -156,8 +157,31 @@ def test_un_transfert_fonctionne_depuis_nimporte_quelle_caisse(ref):
     for journal, caisse in [("CP", "571100"), ("CMD", "571200")]:
         lignes = md.construire_lignes("transfert_interne", {
             "mon_centre": "SAA", "centre_donateur": "SAA", "centre_destinataire": "SIA",
-            "montant": 50000}, journal, ref)
+            "montant": 50000, "motif": "contribution"}, journal, ref)
         assert set(lignes["compte"]) == {VF, caisse}
+
+
+def test_le_motif_est_obligatoire(ref):
+    """07/10/2026 : sans motif (contribution, pret...), le tableau de bord ne
+    saurait pas classer le transfert. L'ecriture ne se construit pas."""
+    for sans in ({}, {"motif": ""}, {"motif": "autre"}):
+        assert md.construire_lignes("transfert_interne", {
+            "mon_centre": "PIS", "centre_donateur": "PIS", "centre_destinataire": "SIA",
+            "montant": 50000, **sans}, "CP", ref) is None
+
+
+def test_le_motif_se_lit_en_tete_du_libelle(ref):
+    def lib(motif, libelle=""):
+        L = md.construire_lignes("transfert_interne", {
+            "mon_centre": "TAM", "centre_donateur": "TAM", "centre_destinataire": "SIA",
+            "montant": 50000, "motif": motif, "libelle": libelle}, "CP", ref)
+        return set(L["libelle"])
+    assert lib("pret") == {"PRET TAM>SIA"}
+    assert lib("pret", "APPROV SIAO") == {"PRET APPROV SIAO"}
+    assert lib("pret", "Prêt au siège") == {"PRÊT AU SIÈGE"}          # deja dit, pas repete
+    assert lib("remboursement") == {"REMBOURSEMENT PRET TAM>SIA"}
+    assert lib("impot", "IMPOT TPA") == {"IMPOT TPA"}
+    assert lib("contribution", "APPROV SIAO") == {"CONTRIBUTION APPROV SIAO"}
 
 
 # =============================================================================
@@ -265,15 +289,15 @@ def test_la_cloture_est_bloquee_par_une_anomalie(ref):
 def test_le_libelle_tape_par_le_caissier_est_conserve(ref):
     lignes = md.construire_lignes("transfert_interne", {
         "mon_centre": "TAM", "centre_donateur": "TAM", "centre_destinataire": "SIA",
-        "montant": 50000, "libelle": "Contribution SIAO"}, "CP", ref)
+        "montant": 50000, "libelle": "Contribution SIAO", "motif": "contribution"}, "CP", ref)
     assert set(lignes["libelle"]) == {"CONTRIBUTION SIAO"}
 
 
 def test_sans_libelle_un_libelle_par_defaut_est_compose(ref):
     lignes = md.construire_lignes("transfert_interne", {
         "mon_centre": "TAM", "centre_donateur": "TAM", "centre_destinataire": "SIA",
-        "montant": 50000}, "CP", ref)
-    assert set(lignes["libelle"]) == {"TRANSFERT TAM>SIA"}
+        "montant": 50000, "motif": "contribution"}, "CP", ref)
+    assert set(lignes["libelle"]) == {"CONTRIBUTION TAM>SIA"}
 
 
 def test_deux_libelles_differents_se_rapprochent_quand_meme(ref):

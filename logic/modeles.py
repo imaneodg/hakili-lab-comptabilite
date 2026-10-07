@@ -22,6 +22,7 @@
 
 import logging
 import re
+import unicodedata
 
 import pandas as pd
 
@@ -366,13 +367,21 @@ def _libelle_transfert(v):
     trois lettres : c'est un libelle comptable destine a l'export Sage, ou la
     place est comptee (60 caracteres). Jamais un texte montre a l'ecran - les
     centres s'y affichent toujours en toutes lettres (voir
-    donnees.nom_centre)."""
-    saisi = str(un(v.get("libelle"), "")).strip()
+    donnees.nom_centre).
+
+    Depuis le 07/10/2026, le libelle commence par le mot du motif
+    ("PRET APPROV SIAO", "CONTRIBUTION TAM>SIA"), sauf s'il le porte deja.
+    Le texte de la caisse est garde tel quel derriere."""
+    mot = MOTS_TRANSFERT.get(motif_transfert(v), "")
+    saisi = " ".join(str(un(v.get("libelle"), "")).split())
     if saisi:
-        return saisi
+        sans_accent = unicodedata.normalize("NFKD", saisi.upper()).encode("ascii", "ignore").decode()
+        if not mot or sans_accent == mot or sans_accent.startswith(mot + " "):
+            return saisi
+        return f"{mot} {saisi}"
     donateur = str(un(v.get("centre_donateur"), "")).strip().upper()
     destinataire = str(un(v.get("centre_destinataire"), "")).strip().upper()
-    return f"TRANSFERT {donateur}>{destinataire}"
+    return f"{mot or 'TRANSFERT'} {donateur}>{destinataire}"
 
 
 def _lignes_transfert(v, cc):
@@ -387,6 +396,10 @@ def _lignes_transfert(v, cc):
     donateur = str(un(v.get("centre_donateur"), "")).strip()
     montant = v.get("montant")
     if not mien or not donateur or not montant:
+        return None
+    # Sans motif, l'operation n'est pas constructible (meme regle qu'un
+    # compte non choisi) : le formulaire dit ce qui manque.
+    if not motif_transfert(v):
         return None
     if mien == donateur:
         return _df(ligne(COMPTE_VIREMENTS_FONDS, v["lib"], debit=montant),
@@ -416,6 +429,38 @@ COMPTE_VIREMENTS_FONDS = "585000"
 # selectionnables dans le formulaire, precisement pour que l'application
 # survive a un changement de decision de la direction. La changer ici suffit.
 CENTRE_DESTINATAIRE_PAR_DEFAUT = "SIA"
+
+# Motif d'un transfert entre centres (07/10/2026). Le libelle seul ne disait
+# pas surement a quoi servait l'argent : le pret de 125 000 F de Tampouy au
+# siege (juin 2026), libelle "APPROV SIAO", etait compte comme une
+# contribution, donc comme une charge d'exploitation du centre - et le
+# libelle compose par defaut ("TRANSFERT TAM>SIA") classait de meme tout
+# transfert saisi sans libelle. Le motif est garde dans valeurs_json et lu
+# par le tableau de bord avant toute regle de libelle (fonction SQL
+# tb_rubrique_motif_transfert, memes cles, migration 2026-10-07b).
+#
+# Pas de motif par defaut : un choix pre-rempli est valide sans etre lu, et
+# l'erreur redeviendrait silencieuse.
+MOTIFS_TRANSFERT = {
+    "contribution": "Contribution au fonctionnement du siege",
+    "pret": "Pret (a rembourser)",
+    "remboursement": "Remboursement d'un pret",
+    "impot": "Impots payes par le siege pour le centre",
+}
+# Mot place en tete du libelle : le motif se lit dans le brouillard, a la
+# validation et dans Sage, sans ouvrir la piece.
+MOTS_TRANSFERT = {
+    "contribution": "CONTRIBUTION",
+    "pret": "PRET",
+    "remboursement": "REMBOURSEMENT PRET",
+    "impot": "IMPOT",
+}
+
+
+def motif_transfert(v):
+    """La cle du motif choisi, ou "" s'il n'est pas (ou mal) renseigne."""
+    m = str(un(v.get("motif"), "")).strip()
+    return m if m in MOTIFS_TRANSFERT else ""
 
 
 
@@ -577,6 +622,8 @@ MODELES = [
              "defaut_centre": "mien"},
             {"n": "centre_destinataire", "l": "Centre qui recoit l'argent", "t": "centre",
              "defaut_centre": CENTRE_DESTINATAIRE_PAR_DEFAUT},
+            {"n": "motif", "l": "Motif", "t": "choix",
+             "options": {"": "Choisir le motif...", **MOTIFS_TRANSFERT}},
             {"n": "montant", "l": "Montant", "t": "montant"},
             {"n": "libelle", "l": "Libelle (facultatif)", "t": "libelle"},
         ],

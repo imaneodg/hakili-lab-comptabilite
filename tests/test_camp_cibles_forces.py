@@ -1,5 +1,6 @@
 # ---------------------------------------------------------------------------
-# Camp de vacances, cibles par centre, forces 3 et 4 (07/10/2026).
+# Camp de vacances, motif des transferts, cibles par centre, forces 3 et 4
+# (07/10/2026).
 #
 # Les pieces sont construites par les vrais modeles de saisie
 # (logic.modeles.construire_operation), puis lues par le tableau de bord :
@@ -34,7 +35,7 @@ JOURNAUX = pd.DataFrame({"journal": ["CP", "CMD", "Banque"],
 def _base_disponible():
     try:
         with dl._connexion() as c, c.cursor() as cur:
-            cur.execute("SELECT 1 FROM centres WHERE code_centre IN ('TAM', 'SAA') HAVING count(*) = 2")
+            cur.execute("SELECT 1 FROM centres WHERE code_centre IN ('TAM', 'SAA', 'SIA') HAVING count(*) = 3")
             return cur.fetchone() is not None
     except Exception:
         return False
@@ -125,6 +126,27 @@ def test_le_choix_de_l_activite_reste_d_une_piece_a_l_autre():
     assert next(iter(champ["options"])) == "cours"
 
 
+def _transfert(motif, libelle=""):
+    v = {"mon_centre": "TAM", "centre_donateur": "TAM", "centre_destinataire": "SIA",
+         "montant": 125000, "libelle": libelle}
+    if motif is not None:
+        v["motif"] = motif
+    return v
+
+
+def test_transfert_sans_motif_non_constructible():
+    for motif in (None, "", "inconnu"):
+        assert md.construire_operation("transfert_interne", _transfert(motif), "CP", JOURNAUX) is None
+    for motif in md.MOTIFS_TRANSFERT:
+        assert md.construire_operation("transfert_interne", _transfert(motif), "CP", JOURNAUX) is not None
+
+
+def test_le_motif_n_a_pas_de_valeur_par_defaut():
+    champ = next(c for c in md.modele_par_id("transfert_interne")["champs"] if c["n"] == "motif")
+    assert next(iter(champ["options"])) == "" and not champ.get("garde")
+    assert set(champ["options"]) - {""} == set(md.MOTIFS_TRANSFERT) == set(md.MOTS_TRANSFERT)
+
+
 # --- import des brouillards : marque du camp ----------------------------------
 
 def test_import_remet_la_marque_du_camp():
@@ -187,6 +209,19 @@ def juillet():
     pub = {**_fournisseur("CAMPAGNE PUBLICITAIRE", "cours"), "montant": 3000,
            "repartition": [{"mois": ["JUILLET"], "nature": "paiement", "montant": 3000}]}
     _inserer("pub", "TAM", jour, "fournisseur", _op("fournisseur", pub, "CMD"))
+    # pret au siege libelle comme une contribution : le motif l'emporte
+    v = _transfert("pret", "APPROV SIAO")
+    _inserer("pret", "TAM", jour, "transfert_interne", _op("transfert_interne", v, "CP"), v, "SIA")
+    # impots payes par le siege : hors exploitation, pas une charge
+    v = {**_transfert("impot"), "montant": 9000}
+    _inserer("impot", "TAM", jour, "transfert_interne", _op("transfert_interne", v, "CP"), v, "SIA")
+    # transfert ancien, sans motif : la regle du libelle s'applique comme avant
+    old = {**_transfert("contribution", "APPROV SIAO"), "montant": 40000}
+    op = _op("transfert_interne", old, "CP")
+    for p in op:
+        p["lignes"]["libelle"] = "APPROV SIAO"          # libelle d'avant le 07/10/2026
+    del old["motif"]
+    _inserer("ancien", "TAM", jour, "transfert_interne", op, old, "SIA")
     yield tb.calculer(DEBUT, FIN, ["TAM"], AUJOURD_HUI)
     _effacer()
 
@@ -218,6 +253,26 @@ def test_vacation_du_camp_hors_graphique_des_cours(juillet):
     juil = juillet["fiches"]["TAM"]["eleves"]["par_mois"][0]
     assert juil["frais"] == 20000
     assert math.isnan(juil["vacations"])
+
+
+@base
+def test_motif_du_transfert_l_emporte_sur_le_libelle(juillet):
+    assert _total(juillet, "Prêts entre centres versés") == 125000
+    assert _total(juillet, "Impôts et taxes") == 9000
+    assert _total(juillet, "Contribution au SIAO") == 40000           # l'ancien, sans motif
+
+
+@base
+def test_chaque_motif_a_une_rubrique():
+    with dl._connexion() as c, c.cursor() as cur:
+        for motif in md.MOTIFS_TRANSFERT:
+            cur.execute("SELECT tb_rubrique_motif_transfert(%s)", (motif,))
+            rubrique = cur.fetchone()[0]
+            assert rubrique, motif
+            cur.execute("SELECT 1 FROM rubriques_tableau WHERE rubrique = %s", (rubrique,))
+            assert cur.fetchone(), rubrique
+        cur.execute("SELECT tb_rubrique_motif_transfert(NULL), tb_rubrique_motif_transfert('autre')")
+        assert cur.fetchone() == (None, None)
 
 
 @base
