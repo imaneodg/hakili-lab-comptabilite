@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY app.py .
 COPY composants.py .
+COPY tableau_bord.py .
 COPY logic ./logic
 COPY sql ./sql
 COPY assistant ./assistant
