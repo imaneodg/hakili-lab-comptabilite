@@ -33,6 +33,9 @@ ECRITURES = {
     "marquer_exporte", "reclasser_piece", "resoudre_tiers", "reparer_tiers_manquants",
     "ajouter_compte", "ajouter_tiers", "ajouter_utilisateur", "desactiver_utilisateur",
     "maj_solde_ouverture", "maj_solde_ouverture_centre", "nouvelle_annee_academique",
+    # 08/10/2026 (audit du 07/10)
+    "cloturer_mois", "rouvrir_mois", "reinitialiser_code", "changer_code",
+    "definir_code",
 }
 
 # Un controle acceptable : soit une garde de role, soit un controle de centre.
@@ -43,7 +46,9 @@ CONTROLES = {"est_comptable", "est_validateur", "_hors_centre"}
 # qu'elle n'en a pas le droit.
 DISPENSES = {
     # Enregistre une piece NEUVE dans le centre de l'utilisateur connecte :
-    # le centre vient de util()["centre"], jamais d'une selection a l'ecran.
+    # le centre vient de util()["centre"] (centre_saisie()), jamais d'une
+    # selection a l'ecran - sauf pour le comptable du siege, qui choisit
+    # depuis le 08/10/2026 le centre concerne parmi les centres reels.
     # Il n'y a donc pas de piece d'un autre centre a atteindre, et la saisie
     # est ouverte a tous les roles par construction.
     "_enregistrer_piece",
@@ -54,6 +59,15 @@ DISPENSES = {
     # doublons sont verifies dans logic.donnees, l'auteur y est trace.
     "_ajouter_tiers",
     "_ajouter_compte",
+    # Chacun change SON propre code : l'identifiant vient de util(), jamais
+    # d'une selection a l'ecran, et l'ancien code est exige par
+    # logic.donnees.changer_code.
+    "_changer_mon_code",
+    "_changer_code_depuis",
+    # Premier choix de code apres une reinitialisation : l'identifiant est
+    # celui qui vient de s'authentifier avec le code provisoire, exige a
+    # nouveau par changer_code. Aucune session n'est encore ouverte.
+    "_changer_code_provisoire",
 }
 
 

@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS utilisateurs (
     -- Anti brute-force : voir logic.donnees.tenter_connexion.
     tentatives_echouees   integer NOT NULL DEFAULT 0,
     verrouille_jusqu_a    timestamptz,
+    -- Code reinitialise par le comptable : a changer a la connexion suivante.
+    doit_changer_code     boolean NOT NULL DEFAULT false,
     actif                 text NOT NULL DEFAULT 'oui' CHECK (actif IN ('oui', 'non')),
     updated_at            timestamptz NOT NULL DEFAULT now()
 );

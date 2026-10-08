@@ -69,9 +69,15 @@ dépensé du mois comparés au mois précédent, le point le plus important à v
 - « Recettes », « reçu », « encaissé », « dépenses », « dépensé », « payé » : l'argent \
 réellement entré ou sorti (encaissements, décaissements). « Par type », « principales \
 dépenses » : regrouper_par type.
-- « Bénéfice », « rentable », « ce que ça a rapporté ou coûté » : resultat, produits, \
-charges (rattachés au mois concerné : les cours d'avril payés en mars comptent pour \
-avril, les vacations de mars payées en avril comptent pour mars). Dis « bénéfice ».
+- « Bénéfice », « résultat », « marge », « rentable », « charges » : les chiffres du \
+tableau de bord, que le directeur lit aussi dans l'onglet Tableau de bord : \
+resultat_tableau, charges_exploitation, encaissements_exploitation, marge_tableau_pct, \
+hors_exploitation (base caisse : à la date du paiement). Tes chiffres doivent être \
+identiques aux siens. Dis « bénéfice ».
+- Seulement si on demande ce que chaque mois a rapporté ou coûté au mois de cours \
+(« rattaché », « au mois de prestation ») : resultat, produits, charges, qui comptent \
+les cours d'avril payés en mars pour avril. Précise alors que ce n'est pas le chiffre \
+du tableau de bord.
 - « Qu'est-ce qui s'est passé », « derniers paiements », « mouvements du jour » : \
 lister_ecritures.
 - « Quelque chose à vérifier », « anomalies », « problèmes » : a_verifier ; pour le \

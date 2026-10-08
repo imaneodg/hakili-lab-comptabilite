@@ -123,10 +123,41 @@ def _libelle_centres(codes, R):
 # BASE DE CALCUL : un tableau long, une ligne par fait, avec les mesures
 # =============================================================================
 
-_MESURES = ["enc", "dec", "scol", "chg", "ms", "cf", "att", "prd"]
+_MESURES = ["enc", "dec", "scol", "chg", "ms", "cf", "att", "prd", "tb_enc", "tb_chg", "tb_hors"]
 MESURE_DE = {"encaissements": "enc", "decaissements": "dec", "frais_scolarite": "scol",
              "autres_encaissements": "enc", "charges": "chg", "masse_salariale": "ms",
-             "charges_fixes": "cf", "en_attente_471": "att", "produits": "prd"}
+             "charges_fixes": "cf", "en_attente_471": "att", "produits": "prd",
+             "encaissements_exploitation": "tb_enc", "charges_exploitation": "tb_chg",
+             "hors_exploitation": "tb_hors"}
+
+
+def faits_tableau(du, au, centres, interne_exclu):
+    """Flux du tableau de bord (08/10/2026, audit du 07/10, M6) : la meme
+    fonction SQL et le meme classement que l'onglet Tableau de bord, donc les
+    memes chiffres. interne_exclu : sans regroupement par centre, un flux
+    entre deux centres choisis (contribution, pret) n'est pas compte, comme
+    dans la vue d'ensemble du tableau de bord."""
+    f = dl._lire_df("""
+        SELECT f.centre, f.id_piece, f.statut, f.compte, f.rubrique, f.sens, f.montant::float AS montant,
+               f.date_piece AS date, f.code_tiers, f.libelle,
+               coalesce(f.contrepartie = ANY(%s) AND f.contrepartie <> f.centre, false) AS interne,
+               r.libelle AS rub_libelle, r.bloc, r.libelle_entree, r.bloc_entree,
+               (SELECT x.journal FROM ecritures x WHERE x.id_piece = f.id_piece LIMIT 1) AS journal
+        FROM flux_tableau_bord(%s, %s, %s) f JOIN rubriques_tableau r ON r.rubrique = f.rubrique""",
+                    (list(centres), du, au, list(centres)))
+    if len(f) == 0:
+        return f
+    if interne_exclu:
+        f = f[~f["interne"].astype(bool)]
+    a_part = f["libelle_entree"].notna() & (f["libelle_entree"] != "") & (f["sens"] == "entree")
+    bloc = f["bloc"].where(~a_part, f["bloc_entree"].fillna(f["bloc"]))
+    f = f.assign(categorie=f["rub_libelle"].where(~a_part, f["libelle_entree"]))
+    f["tb_enc"] = f["montant"].where(bloc == "encaissement", 0.0)
+    f["tb_chg"] = (-f["montant"]).where(bloc == "charge", 0.0)
+    f["tb_hors"] = (-f["montant"]).where(bloc == "hors_exploitation", 0.0)
+    f["piece"] = None
+    f["eleve"] = ""
+    return f[bloc.isin(["encaissement", "charge", "hors_exploitation"])]
 
 
 def _sources(inds):
@@ -139,7 +170,7 @@ def _sources(inds):
     return s
 
 
-def _base(d, R, sources, regime, d_etendu=None, per=None):
+def _base(d, R, sources, regime, d_etendu=None, per=None, tableau=None):
     """d : lignes de la periode (tresorerie, 471). d_etendu : lignes autour de
     la periode, pour les produits et charges rattaches a leur mois de
     prestation (un paiement de janvier peut etre une charge de decembre) ;
@@ -182,6 +213,8 @@ def _base(d, R, sources, regime, d_etendu=None, per=None):
             c["piece"] = None
             c["eleve"] = ""
             morceaux.append(c)
+    if tableau is not None and len(tableau):
+        morceaux.append(tableau)
     if "attente" in sources:
         a = sem.faits_attente(d)
         if len(a):
@@ -238,6 +271,11 @@ def _indicateurs_depuis(s, inds):
         "produits": s.get("prd", 0.0), "resultat": s.get("prd", 0.0) - s.get("chg", 0.0),
         "marge_resultat_pct": _ratio(s.get("prd", 0.0) - s.get("chg", 0.0), s.get("prd", 0.0)),
         "charges_fixes": s.get("cf", 0.0), "en_attente_471": s.get("att", 0.0),
+        "encaissements_exploitation": s.get("tb_enc", 0.0),
+        "charges_exploitation": s.get("tb_chg", 0.0),
+        "hors_exploitation": s.get("tb_hors", 0.0),
+        "resultat_tableau": s.get("tb_enc", 0.0) - s.get("tb_chg", 0.0),
+        "marge_tableau_pct": _ratio(s.get("tb_enc", 0.0) - s.get("tb_chg", 0.0), s.get("tb_enc", 0.0)),
         "marge_pct": _ratio(enc - dec, enc),
         "part_masse_salariale_pct": _ratio(s.get("ms", 0.0), s.get("chg", 0.0)),
         "part_charges_fixes_pct": _ratio(s.get("cf", 0.0), s.get("chg", 0.0)),
@@ -353,7 +391,11 @@ def _calculer(ctx, dem, per=None):
         # Six mois de part et d'autre : avances payees avant le mois de cours,
         # vacations et loyers regles apres.
         d_etendu = sem.lire_lignes(per.du - timedelta(days=186), per.au + timedelta(days=186), dem.codes)
-    b = _base(d, R, sources, regime, d_etendu, per)
+    tableau = None
+    if "tableau" in sources:
+        codes = list(dem.codes or R.centres_actifs())
+        tableau = faits_tableau(per.du, per.au, codes, interne_exclu="centre" not in dem.dims)
+    b = _base(d, R, sources, regime, d_etendu, per, tableau)
     if dem.cats:
         b = b[b["categorie"].isin(dem.cats)]
     if dem.compte:
@@ -1214,7 +1256,16 @@ _SQL_INTERDIT = re.compile(
     r"\b(insert|update|delete|drop|alter|create|grant|revoke|truncate|copy|call|execute|prepare|"
     r"listen|notify|vacuum|comment|security|reset|lock|refresh|cluster|reindex|import)\b|"
     r"\bset\s|pg_|current_setting|set_config|dblink|\blo_|utilisateurs|journal_assistant|"
-    r"suppressions_ecritures|information_schema|code_acces", re.IGNORECASE)
+    r"suppressions_ecritures|information_schema|code_acces|"
+    # 08/10/2026 (audit du 07/10, M8) : fonctions qui executent une requete
+    # passee en chaine (query_to_xml...) ou lisent hors des tables prevues.
+    r"query_to|cursor_to|table_to|schema_to|database_to|\bxml|\blo_|\bdo\b", re.IGNORECASE)
+
+# Role PostgreSQL sous lequel s'execute la requete libre (cree par
+# sql/migrations/2026-10-08_correctifs_audit.sql) : il ne peut lire que les
+# tables de TABLES_SQL. C'est la vraie barriere ; le filtre texte ci-dessus
+# n'est qu'un premier tri, contournable (FROM a, b ; "nom entre guillemets").
+ROLE_LECTURE = "hakili_lecture"
 
 
 def verifier_sql(sql):
@@ -1244,10 +1295,18 @@ def requete_sql(ctx, sql):
     s = verifier_sql(sql)
     limite = config.SQL_LIGNES_MAX
 
-    def _executer(conn):
+    def _executer(conn, role=True):
         with conn.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             cur.execute(f"SET LOCAL statement_timeout = {int(config.SQL_TIMEOUT_MS)}")
+            if role:
+                cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ROLE_LECTURE,))
+                if cur.fetchone() is None:
+                    raise Incomprehension(
+                        "sql_indisponible",
+                        "La requete libre est desactivee : le role de lecture seule n'existe pas "
+                        "sur cette base. Utiliser les autres outils de l'assistant.")
+                cur.execute(f"SET LOCAL ROLE {ROLE_LECTURE}")
             cur.execute(f"SELECT * FROM ({s}) AS requete LIMIT {limite + 1}")
             noms = [c.name for c in cur.description]
             return noms, cur.fetchall()
@@ -1257,13 +1316,18 @@ def requete_sql(ctx, sql):
             import psycopg2
             conn = psycopg2.connect(config.DSN_LECTURE)
             try:
-                noms, rows = _executer(conn)
+                noms, rows = _executer(conn, role=False)
                 conn.rollback()
             finally:
                 conn.close()
         else:
             with dl._connexion() as conn:
-                noms, rows = _executer(conn)
+                try:
+                    noms, rows = _executer(conn)
+                finally:
+                    # Ne jamais rendre au pool une connexion encore sous le
+                    # role de lecture (SET LOCAL s'annule au rollback).
+                    conn.rollback()
     except Incomprehension:
         raise
     except Exception as e:

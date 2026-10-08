@@ -48,7 +48,8 @@ APP_PY = Path(__file__).resolve().parent.parent / "app.py"
 # suite). Voir DISPENSES dans test_autorisation_exhaustive.py et le test
 # test_creation_referentiel_exige_une_session ci-dessous.
 FONCTIONS_RESERVEES_AU_COMPTABLE = [
-    "_marquer", "_reparer",
+    "_marquer", "_marquer_confirme", "_reparer",
+    "_cloturer_mois", "_rouvrir_mois", "_reinitialiser_code",
     "_ajouter_utilisateur", "_desactiver_utilisateur",
     "_soldes", "_nouvelle_annee",
 ]

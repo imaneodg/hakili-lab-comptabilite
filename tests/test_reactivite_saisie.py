@@ -248,8 +248,10 @@ def test_m_ruban_isole_ref_et_donnees():
     assert blocs and any(_appelle(bloc, "ref") for bloc in blocs), (
         "m_ruban() lit ref() hors d'un `with reactive.isolate():`."
     )
-    assert blocs and any(_appelle(bloc, "donnees") for bloc in blocs), (
-        "m_ruban() lit donnees() hors d'un `with reactive.isolate():` - le "
+    # Depuis le 08/10/2026, le solde vient de tresorerie() (mouvements cumules)
+    # et non plus de donnees() : meme exigence d'isolement.
+    assert blocs and any(_appelle(bloc, "donnees") or _appelle(bloc, "tresorerie") for bloc in blocs), (
+        "m_ruban() lit donnees()/tresorerie() hors d'un `with reactive.isolate():` - le "
         "ruban d'effet sur les caisses redeviendrait instable (sondage 0,5 s)."
     )
 

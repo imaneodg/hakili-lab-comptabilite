@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import re
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -259,7 +259,7 @@ def server(input, output, session):
 
     def _revision_tolerante():
         try:
-            derniere_revision["valeur"] = dl.revision_bd()
+            derniere_revision["valeur"] = dl.revisions_bd()
         except Exception:
             logger.warning("Sondage de la revision impossible : la derniere "
                            "valeur connue est conservee.", exc_info=True)
@@ -269,20 +269,29 @@ def server(input, output, session):
     def _disque():
         return _revision_tolerante()
 
+    # Deux revisions distinctes (08/10/2026, audit du 07/10, M1) : une
+    # ecriture ne fait plus relire le referentiel, une creation de tiers ne
+    # fait plus relire les ecritures. reactive.value n'invalide ses
+    # dependants que si la valeur change vraiment.
+    rev_ecritures = reactive.value(None)
+    rev_referentiel = reactive.value(None)
+
+    @reactive.effect
+    def _repartir_revisions():
+        v = _disque()
+        if v is None:
+            return
+        rev_ecritures.set(v[0])
+        rev_referentiel.set(v[1])
+
     @reactive.calc
     def ref():
-        _disque()
+        rev_referentiel()
         return dl.lire_referentiel()
 
     util = reactive.value(None)          # utilisateur connecte
     login_msg = reactive.value(None)
     dernier_msg = reactive.value(None)
-    # Figee au moment de l'affichage de la modale "Marquer comme exportees"
-    # (corrige le 22/09/2026, M5 de l'audit du 18/09) : voir _marquer/
-    # _marquer_confirme plus bas. Sans cela, _marquer_confirme recalculait
-    # a_exporter() au moment du clic, qui pouvait differer de ce que le
-    # comptable venait de confirmer si une pièce etait validee entretemps.
-    ids_a_marquer = reactive.value([])
 
     @reactive.effect
     def _revalider_compte_actif():
@@ -294,7 +303,7 @@ def server(input, output, session):
         # fermeture du navigateur. Se raccroche au meme sondage plutot que
         # d'en creer un second : c'est deja la requete la plus frequente de
         # l'application, autant y ajouter un controle bon marche.
-        _disque()
+        rev_ecritures()
         u = util()
         if u is None:
             return
@@ -335,11 +344,21 @@ def server(input, output, session):
     def rafraichir():
         maj.set(maj() + 1)
 
+    # Fenetre de travail (08/10/2026, audit du 07/10, M1) : l'annee en cours
+    # et toute piece pas encore exportee, quelle que soit sa date. L'historique
+    # exporte se relit a la demande (periode du Brouillard) ; les soldes de
+    # caisse, eux, portent toujours sur tout l'historique (tresorerie()).
     @reactive.calc
     def donnees():
-        maj()       # nos propres actions, effet immediat
-        _disque()   # les ecritures d'un autre poste
-        return dl.lire_ecritures()
+        maj()             # nos propres actions, effet immediat
+        rev_ecritures()   # les ecritures d'un autre poste
+        return dl.lire_ecritures(fenetre=dl.debut_fenetre())
+
+    @reactive.calc
+    def tresorerie():
+        maj()
+        rev_ecritures()
+        return dl.mouvements_tresorerie()
 
     # Corrige le 11/09/2026 : "validation" existe desormais a deux niveaux -
     # le comptable du siege (centre SIE), qui voit et administre l'ensemble
@@ -353,7 +372,7 @@ def server(input, output, session):
     @reactive.calc
     def est_comptable():
         u = util()
-        return u is not None and u.get("role") == "validation" and u.get("centre") == "SIE"
+        return u is not None and u.get("role") == "validation" and u.get("centre") == "SIE"  # = dl.CENTRE_SIEGE
 
     # Role "validation", quel que soit le centre (siege ou local) : donne
     # acces aux onglets Validation/Export et au bouton "Valider"/"Renvoyer",
@@ -364,6 +383,20 @@ def server(input, output, session):
     def est_validateur():
         u = util()
         return u is not None and u.get("role") == "validation"
+
+    # Centre auquel une NOUVELLE piece est rattachee : celui de l'utilisateur,
+    # ou, pour le comptable du siege, le centre choisi dans le formulaire
+    # (seulement parmi les centres reels). "" tant qu'il n'a rien choisi.
+    def centre_saisie():
+        u = util()
+        if u is None:
+            return ""
+        if not est_comptable():
+            return u["centre"]
+        choisi = get_input("m_centre", "")
+        with reactive.isolate():
+            reels = dl.centres_reels(ref())
+        return choisi if choisi in reels else ""
 
     # Un validateur local ne doit jamais pouvoir agir sur les pieces d'un
     # autre centre que le sien, meme si l'ecran (Brouillard/Validation) ne
@@ -384,7 +417,7 @@ def server(input, output, session):
         return est_comptable()
 
     # Tableau de bord : reserve au comptable, verifie aussi cote serveur.
-    tableau_bord.serveur("tb", autorise=est_comptable, actualiser=lambda: (maj(), _disque()))
+    tableau_bord.serveur("tb", autorise=est_comptable, actualiser=lambda: (maj(), rev_ecritures()))
 
     # Lecture tolerante d'un input dynamique (ch_*, sold_*) : peut ne pas
     # encore exister cote client, comme un input$xxx NULL en R.
@@ -464,11 +497,17 @@ def server(input, output, session):
                     {"class": "carte carte-compacte"},
                     carte_bandeau("file-earmark-text", "Informations sur l'opération"),
                     ui.row(
-                        ui.column(8, ui.input_select("m_modele", "Modele d'operation",
+                        ui.column(8, ui.input_select("m_modele", "Modèle d'opération",
                                                        choices=_modeles_groupes(r))),
-                        ui.column(4, ui.input_date("m_date", "Date de l'operation",
+                        ui.column(4, ui.input_date("m_date", "Date de l'opération",
                                                     value=date.today(), format="dd/mm/yyyy")),
                     ),
+                    # Le comptable n'a pas de caisse : il dit pour quel centre
+                    # il saisit (08/10/2026, audit du 07/10, M7). Avant, ses
+                    # pieces partaient au "centre" Siege, qui n'en est pas un.
+                    ui.input_select("m_centre", "Centre concerné",
+                                    choices={"": "Choisir le centre…", **dl.centres_reels(r)})
+                    if est_comptable() else None,
                     # Le journal est impose par le modele dans presque tous
                     # les cas (cf. _modele_journal/_garde_journal plus bas,
                     # qui le remettent en place et avertissent si on le
@@ -649,6 +688,10 @@ def server(input, output, session):
         )
 
     def onglet_export(r):
+        # Ecran d'avant le 08/10/2026, garde tel quel a la demande d'Afiya.
+        # Seul ajout : e_alerte, sous les filtres. Une piece deja exportee ne
+        # part dans le fichier que si les DEUX cases sont cochees (voir
+        # _inclure_deja_exportees).
         return ui.nav_panel(
             "Export Sage",
             titre_page("download", "Export Sage",
@@ -664,6 +707,7 @@ def server(input, output, session):
                         "e_journal", "Journal", choices=["Tous"] + list(r["journaux"]["journal"]))),
                     filtre(ui.input_checkbox("e_deja", "Inclure les pièces déjà exportées", False)),
                 ),
+                ui.output_ui("e_alerte"),
                 # e_resume() est un resume dynamique calcule (nombre de
                 # pieces/lignes/montant du filtre en cours), pas une liste
                 # de regles statiques : reste en .ruban (deja restyle aux
@@ -846,6 +890,20 @@ def server(input, output, session):
                 ui.input_action_button("r_desactiver_utilisateur", "Désactiver l'utilisateur choisi",
                                         icon=ui.tags.i({"class": "bi bi-person-dash"}),
                                         class_="hk-btn-secondaire"),
+                # Code oublie (08/10/2026, audit du 07/10, M9) : un code
+                # provisoire, que la personne doit changer a sa prochaine
+                # connexion.
+                ui.tags.details(
+                    {"class": "hk-deplier"},
+                    ui.tags.summary("Réinitialiser le code d'un utilisateur"),
+                    ui.p({"class": "aide"},
+                         "Choisissez la personne dans le tableau ci-dessus, donnez-lui un code "
+                         "provisoire : elle devra le changer à sa prochaine connexion."),
+                    ui.input_password("r_code_provisoire", "Code provisoire (6 caractères au moins)"),
+                    ui.input_action_button("r_reinitialiser_code", "Réinitialiser le code",
+                                            icon=ui.tags.i({"class": "bi bi-key"}),
+                                            class_="hk-btn-secondaire"),
+                ),
             ))
             blocs.append(ui.div(
                 {"class": "carte"},
@@ -868,7 +926,32 @@ def server(input, output, session):
                             "hk-btn-secondaire", "a-gauche", width="100%"),
                         ui.p({"class": "aide"}, "Une fois par an, à la rentrée."))),
                 ),
+                # Cloture des mois (08/10/2026, audit du 07/10, M3).
+                ui.tags.details(
+                    {"class": "hk-deplier"},
+                    ui.tags.summary("Clôture des mois"),
+                    ui.p({"class": "aide"},
+                         "Un mois clôturé ne reçoit plus aucune pièce et ses pièces ne changent "
+                         "plus : l'application et Sage restent d'accord sur le passé. On ne clôture "
+                         "qu'un mois entièrement exporté."),
+                    ui.output_ui("r_clotures"),
+                ),
             ))
+
+        blocs.append(ui.div(
+            {"class": "carte"},
+            carte_bandeau("key", "Mon code d'accès"),
+            ui.tags.details(
+                {"class": "hk-deplier"},
+                ui.tags.summary("Changer mon code"),
+                ui.input_password("r_code_actuel", "Code actuel"),
+                ui.input_password("r_code_nouveau", "Nouveau code (6 caractères au moins)"),
+                ui.input_password("r_code_confirmation", "Nouveau code, encore une fois"),
+                ui.input_action_button("r_changer_code", "Changer mon code",
+                                        icon=ui.tags.i({"class": "bi bi-key"}),
+                                        class_="hk-btn-secondaire"),
+            ),
+        ))
 
         return ui.nav_panel(
             "Référentiel",
@@ -1022,6 +1105,10 @@ def server(input, output, session):
         u = util()
         if u is not None:
             role_txt = "validation et export" if u.get("role") == "validation" else "saisie"
+            # Nom du centre en toutes lettres (jamais le code). Isole : la page
+            # ne doit pas se reconstruire a chaque changement du referentiel.
+            with reactive.isolate():
+                r = ref()
             return ui.TagList(
                 # Sidebar : logo en tete (fixe) - memes informations qu'avant
                 # (nom, centre, role, deconnexion), simplement deplacees du
@@ -1049,11 +1136,12 @@ def server(input, output, session):
                         ui.div(
                             {"class": "hk-centre-carte-texte"},
                             ui.span({"class": "hk-centre-carte-label"}, "Centre"),
-                            ui.span({"class": "hk-centre-carte-valeur"}, u.get("centre")),
+                            ui.span({"class": "hk-centre-carte-valeur"},
+                                    dl.nom_centre(r, u.get("centre"))),
                         ),
                     ),
                     ui.tags.b(u.get("nom")),
-                    f"Centre {u.get('centre')} - {role_txt}",
+                    f"{dl.nom_centre(r, u.get('centre'))} - {role_txt}",
                     ui.input_action_link("deconnexion", "Fermer la session",
                                           style="display:block")),
                 # En-tete blanc (refonte visuelle, etape 2 - coquille) :
@@ -1160,14 +1248,49 @@ def server(input, output, session):
             # correction d'une piece d'un autre centre et refusee (constate
             # le 23/09/2026 : correction ouverte sur SIE, reconnexion sur NAG).
             _oublier_saisie_en_cours()
-            util.set(u)
             login_msg.set(None)
+            if u.get("doit_changer_code"):
+                # Code provisoire donne par le comptable (08/10/2026) : la
+                # session ne s'ouvre qu'une fois le code personnel choisi.
+                en_attente_code.set({**u, "code_provisoire": input.l_code()})
+                ui.modal_show(ui.modal(
+                    ui.p("Votre code est provisoire. Choisissez votre code personnel pour continuer."),
+                    ui.input_password("l_code_nouveau", "Nouveau code (6 caractères au moins)"),
+                    ui.input_password("l_code_confirmation", "Nouveau code, encore une fois"),
+                    ui.input_action_button("l_changer_code", "Enregistrer mon code",
+                                            class_="hk-btn-primaire"),
+                    title="Choisir votre code", easy_close=False, footer=None))
+                return
+            util.set(u)
         elif statut == "inactif":
             login_msg.set("Ce compte a ete desactive.")
         elif statut == "verrouille":
             login_msg.set(f"Trop de tentatives incorrectes. Reessayer dans {minutes} min.")
         else:
             login_msg.set("Centre, nom d'utilisateur ou code incorrect.")
+
+    en_attente_code = reactive.value(None)
+
+    @reactive.effect
+    @reactive.event(input.l_changer_code)
+    def _changer_code_provisoire():
+        u = en_attente_code()
+        if u is None:
+            ui.modal_remove()
+            return
+        nouveau = get_input("l_code_nouveau", "")
+        if nouveau != get_input("l_code_confirmation", ""):
+            ui.notification_show("Les deux saisies sont différentes.", type="error")
+            return
+        try:
+            dl.changer_code(u["identifiant"], u["code_provisoire"], nouveau)
+        except ValueError as e:
+            ui.notification_show(str(e), type="error")
+            return
+        en_attente_code.set(None)
+        ui.modal_remove()
+        util.set({k: v for k, v in u.items() if k not in ("code_provisoire", "doit_changer_code")})
+        ui.notification_show("Code enregistré.", type="message")
 
     @reactive.effect
     @reactive.event(input.deconnexion)
@@ -1850,7 +1973,7 @@ def server(input, output, session):
         # siege qui corrige une sortie de Pissy doit produire une sortie de
         # Pissy (23/09/2026, correction ouverte aux validateurs).
         cor_c = correction()
-        v["mon_centre"] = (cor_c or {}).get("centre") or (u_courant or {}).get("centre", "")
+        v["mon_centre"] = (cor_c or {}).get("centre") or (centre_saisie() if u_courant else "")
         for ch in champs:
             v[ch["n"]] = get_input(f"ch_{ch['n']}")
         for ch in champs:
@@ -1987,7 +2110,7 @@ def server(input, output, session):
         comptable = est_comptable()
         morceaux = []
         with reactive.isolate():
-            d = donnees()
+            d = tresorerie()
         for j, val in eff.items():
             physique = "caisse_physique" in r["journaux"].columns and (
                 r["journaux"].loc[r["journaux"]["journal"] == j, "caisse_physique"] == "oui").iloc[0]
@@ -1996,7 +2119,10 @@ def server(input, output, session):
                 # caissiere qui fait un versement en banque voit l'effet sur
                 # sa propre caisse (ci-dessous), jamais le solde de la banque.
                 continue
-            centre_c = ((correction() or {}).get("centre") or u["centre"]) if physique else None
+            centre_c = ((correction() or {}).get("centre")
+                        or (centre_saisie() if comptable else u["centre"])) if physique else None
+            if physique and not centre_c:
+                continue  # comptable : centre pas encore choisi
             apres = dl.solde_caisse(j, r, d, centre=centre_c) + val
             sens = "diminue" if val < 0 else "augmente"
             morceaux.append(f"caisse {j} {sens} de <span class='num'>{dl.fcfa(abs(val))}</span> F, "
@@ -2032,6 +2158,12 @@ def server(input, output, session):
             return
         u = util()
         m = md.modele_par_id(input.m_modele())
+        # Avant toute ecriture (creation de tiers comprise) : le comptable
+        # doit avoir dit pour quel centre il saisit.
+        centre = centre_saisie()
+        if correction() is None and not centre:
+            ui.notification_show("Choisissez le centre concerné par cette opération.", type="error")
+            return
 
         # Resolution definitive des champs tiers : un nom nouveau devient un
         # tiers reellement cree dans le referentiel a cet instant precis, un
@@ -2085,7 +2217,7 @@ def server(input, output, session):
                                           input.m_modele(), u["identifiant"], note=note,
                                           valeurs=v_resolues)
             else:
-                res = dl.enregistrer_operation(op, u["centre"], input.m_date(), input.m_modele(),
+                res = dl.enregistrer_operation(op, centre, input.m_date(), input.m_modele(),
                                                 u["identifiant"], note=note, valeurs=v_resolues)
         except Exception as e:
             ui.notification_show(str(e), type="error")
@@ -2175,8 +2307,15 @@ def server(input, output, session):
 
     @reactive.calc
     def pieces_vue():
-        d = donnees()
         u = req(util())  # tab inatteignable avant connexion, garde defensive quand meme
+        d = donnees()
+        # Periode qui commence avant la fenetre de travail : l'historique
+        # exporte de cette periode est relu en base (lecture seule).
+        periode = input.b_periode()
+        if periode and periode[0] and periode[1] and \
+                pd.Timestamp(periode[0]).date() < dl.debut_fenetre():
+            d = dl.lire_ecritures(centre=None if est_comptable() else u["centre"],
+                                  du=periode[0], au=periode[1])
         if len(d) == 0:
             return d
         if not est_comptable():
@@ -2316,7 +2455,7 @@ def server(input, output, session):
             stat("Sorties de caisse", dl.fcfa(sorties), icone="arrow-up-circle"),
             stat("Virements internes", dl.fcfa(virements), icone="arrow-left-right"),
         ]
-        dtot = donnees()
+        dtot = tresorerie()
         for j in jx["journal"]:
             physique = "caisse_physique" in jx.columns and \
                 (jx.loc[jx["journal"] == j, "caisse_physique"] == "oui").iloc[0]
@@ -2608,7 +2747,7 @@ def server(input, output, session):
             ui.modal_show(ui.modal(
                 ui.p("Ces pieces comportent des anomalies bloquantes :"),
                 ui.tags.ul(*items),
-                title="Validation impossible", easy_close=True))
+                title="Validation impossible", easy_close=True, footer=ui.modal_button("Annuler")))
             return
         try:
             res = dl.valider_pieces(ids, util()["identifiant"])
@@ -2659,39 +2798,100 @@ def server(input, output, session):
         rafraichir()
 
     # ---------------- export --------------------------------------------------
+    #
+    # Ecran d'avant le 08/10/2026 (fichier telecharge + "Marquer comme
+    # exportees"), avec une regle en plus, decidee par Afiya le 08/10 : une
+    # piece deja exportee ne repart JAMAIS dans le fichier par simple oubli.
+    # Il faut cocher "Inclure les pieces deja exportees" PUIS "Je confirme
+    # vouloir les renvoyer a Sage". Les deux cases se decochent des que la
+    # periode ou le journal change.
 
     @reactive.calc
-    def a_exporter():
-        # Corrige le 11/09/2026 : meme faille qu'attente() - ne filtrait par
-        # aucun centre. L'export vers Sage reste une action reservee au
-        # comptable du siege (_marquer, inchange), mais un validateur local
-        # ne doit meme pas voir dans cet onglet les pieces validees d'un
-        # autre centre que le sien.
+    def pieces_periode():
+        # Pieces validees ou exportees de la periode, dans le perimetre de
+        # l'utilisateur. Corrige le 11/09/2026 : un validateur local ne voit
+        # que son centre.
         u = req(util())
         d = donnees()
+        periode = input.e_periode()
+        # Periode qui commence avant la fenetre de travail : les pieces
+        # exportees de cette periode ne sont pas en memoire, on les relit.
+        if periode and periode[0] and periode[1] and \
+                pd.Timestamp(periode[0]).date() < dl.debut_fenetre():
+            d = dl.lire_ecritures(centre=None if est_comptable() else u["centre"],
+                                  du=periode[0], au=periode[1])
         if len(d) == 0:
             return d
         if not est_comptable():
             d = d[d["centre"] == u["centre"]]
-        statuts = ["validee", "exportee"] if input.e_deja() else ["validee"]
-        d = d[d["statut"].isin(statuts)]
+        d = d[d["statut"].isin(["validee", "exportee"])]
         if input.e_journal() and input.e_journal() != "Tous":
             d = d[d["journal"] == input.e_journal()]
-        periode = input.e_periode()
         if periode and periode[0] and periode[1]:
             dts = pd.to_datetime(d["date_piece"])
             d = d[(dts >= pd.Timestamp(periode[0])) & (dts <= pd.Timestamp(periode[1]))]
         return d
+
+    @reactive.calc
+    def nb_deja_exportees():
+        d = pieces_periode()
+        return 0 if len(d) == 0 else int(d.loc[d["statut"] == "exportee", "id_piece"].nunique())
+
+    def _inclure_deja_exportees():
+        return bool(input.e_deja()) and bool(get_input("e_deja_confirme", False))
+
+    @reactive.calc
+    def a_exporter():
+        d = pieces_periode()
+        if len(d) and not _inclure_deja_exportees():
+            d = d[d["statut"] == "validee"]
+        return d
+
+    @reactive.effect
+    @reactive.event(input.e_periode, input.e_journal, ignore_init=True)
+    def _decocher_deja():
+        # Une confirmation donnee pour une periode ne vaut pas pour une autre.
+        ui.update_checkbox("e_deja", value=False)
+
+    @render.ui
+    def e_alerte():
+        # Ne lit pas e_deja_confirme : la case serait recreee (donc decochee)
+        # a chaque clic dessus.
+        n = nb_deja_exportees()
+        if n == 0:
+            return None
+        une = n == 1
+        if not input.e_deja():
+            return ui.div(
+                {"class": "ruban alerte"},
+                ui.tags.i({"class": "bi bi-exclamation-triangle"}), " ",
+                (f"Cette période contient 1 pièce déjà exportée vers Sage. Elle n'est pas dans le fichier."
+                 if une else
+                 f"Cette période contient {n} pièces déjà exportées vers Sage. Elles ne sont pas dans "
+                 "le fichier."))
+        return ui.div(
+            {"class": "ruban ko"},
+            ui.tags.i({"class": "bi bi-x-octagon"}), " ",
+            ("Cette pièce est déjà dans Sage. La renvoyer créera un doublon, sauf si elle a été "
+             "supprimée de Sage." if une else
+             f"Ces {n} pièces sont déjà dans Sage. Les renvoyer créera des doublons, sauf si elles "
+             "ont été supprimées de Sage."),
+            ui.div({"class": "confirmation-export"},
+                   ui.input_checkbox("e_deja_confirme",
+                                     "Je confirme vouloir la renvoyer à Sage" if une else
+                                     "Je confirme vouloir les renvoyer à Sage", False)))
 
     @render.ui
     def e_resume():
         d = a_exporter()
         if len(d) == 0:
             return ui.div({"class": "ruban att"}, "Aucune pièce validée sur cette période.")
-        return ui.div({"class": "ruban ok"},
-                       f"{d['id_piece'].nunique()} piece(s), {len(d)} ligne(s), "
-                       f"{dl.fcfa(d['debit'].sum())} F au debit. Le fichier suit l'ordre de colonnes "
-                       "declare dans Sage.")
+        deja = int(d.loc[d["statut"] == "exportee", "id_piece"].nunique())
+        dont = f", dont {deja} déjà exportée(s)" if deja else ""
+        return ui.div({"class": "ruban ko" if deja else "ruban ok"},
+                       f"{d['id_piece'].nunique()} pièce(s){dont}, {len(d)} ligne(s), "
+                       f"{dl.fcfa(d['debit'].sum())} F au débit. Le fichier suit l'ordre de colonnes "
+                       "déclaré dans Sage.")
 
     @render.data_frame
     def e_table():
@@ -2700,48 +2900,54 @@ def server(input, output, session):
         if x is None:
             return render.DataGrid(pd.DataFrame({"Message": ["Rien à exporter."]}), selection_mode="none")
         # L'index porte l'id_piece de chaque ligne affichee. Invisible a
-        # l'ecran et sans effet sur les fichiers telecharges (to_csv/to_excel
-        # sont appeles avec index=False sur le resultat brut de format_sage),
-        # mais c'est ce qui permet a _marquer() de savoir EXACTEMENT quelles
-        # pieces sont sous les yeux du comptable une fois la rangee de
-        # filtres utilisee - voir son commentaire. format_sage ne fait que
-        # trier et reprendre des colonnes de d : le resultat garde donc
-        # l'index de d, qui est unique (_normaliser_lecture reindexe).
+        # l'ecran et sans effet sur les fichiers telecharges (index=False),
+        # mais c'est ce qui permet a _marquer() de savoir quelles pieces sont
+        # sous les yeux du comptable une fois la rangee de filtres utilisee.
         x = x.set_axis(d.loc[x.index, "id_piece"].to_numpy(), axis=0)
         return render.DataGrid(x, selection_mode="none", width="100%", filters=True)
 
-    @render.download_button(filename=lambda: f"sage_{date.today().strftime('%Y%m%d')}.txt", encoding="cp1252")
+    def _nom_fichier_export(ext):
+        suffixe = "_AVEC_DEJA_EXPORTEES" if _inclure_deja_exportees() and nb_deja_exportees() else ""
+        return f"sage_{date.today():%Y%m%d}{suffixe}.{ext}"
+
+    def _tracer_reexport():
+        d = a_exporter()
+        if len(d) == 0:
+            return
+        deja = d.loc[d["statut"] == "exportee", "id_piece"].nunique()
+        if deja:
+            p = input.e_periode()
+            logger.warning("Export Sage avec %s piece(s) deja exportee(s), periode %s au %s, par %s.",
+                           deja, p[0] if p else "?", p[1] if p else "?",
+                           (util() or {}).get("identifiant"))
+
+    @render.download_button(filename=lambda: _nom_fichier_export("txt"), encoding="cp1252")
     def e_txt():
         x = dl.format_sage(a_exporter(), ref())
         if x is None:
-            yield ""
+            yield b""
             return
-        texte = x.to_csv(sep=";", index=False, header=False, lineterminator="\r\n", na_rep="")
-        # Corrige le 10/09/2026 : cp1252 (au lieu de latin1) couvre en plus
-        # "oe", les guillemets typographiques et le tiret cadratin ; et on
-        # encode nous-memes avec errors="replace" plutot que de laisser
-        # @render.download_button faire chunk.encode(encoding) sans filet -
-        # Shiny transmet un chunk deja en bytes tel quel, sans le reencoder,
-        # donc un caractere malgre tout hors cp1252 devient "?" au lieu de
-        # faire planter (UnicodeEncodeError) le telechargement de tout le lot
-        # de pieces selectionne.
-        yield texte.encode("cp1252", errors="replace")
+        _tracer_reexport()
+        # cp1252 encode ici avec errors="replace" (10/09/2026) : un caractere
+        # hors cp1252 devient "?" au lieu de faire echouer le telechargement.
+        yield dl.texte_fichier_sage(x)
 
     @render.download_button(
-        filename=lambda: f"sage_{date.today().strftime('%Y%m%d')}.xlsx",
+        filename=lambda: _nom_fichier_export("xlsx"),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     def e_xlsx():
         x = dl.format_sage(a_exporter(), ref())
         if x is None:
             x = pd.DataFrame()
+        else:
+            _tracer_reexport()
         buf = io.BytesIO()
         x.to_excel(buf, index=False, engine="openpyxl")
         yield buf.getvalue()
 
     # Pieces reellement visibles dans e_table apres utilisation de la rangee
-    # de filtres du navigateur. Renvoie None si le tableau n'a pas encore
-    # envoye sa vue (onglet jamais ouvert, grille en cours de rendu) : c'est
-    # une information d'affichage, jamais une source de verite pour agir.
+    # de filtres du navigateur. None si le tableau n'a pas encore envoye sa
+    # vue : information d'affichage, jamais une source de verite pour agir.
     def _pieces_affichees_export():
         try:
             vue = e_table.data_view()
@@ -2751,44 +2957,35 @@ def server(input, output, session):
             return None
         return list(dict.fromkeys(vue.index))
 
+    ids_a_marquer = reactive.value([])
+
     @reactive.effect
     @reactive.event(input.e_marquer)
     def _marquer():
-        # Meme filet de securite que _valider : l'export vers Sage est
-        # reserve au comptable a l'ecran (onglet_export), a reverifier ici.
         if not est_comptable():
             ui.notification_show("Action réservée au comptable.", type="error")
             return
         d = a_exporter()
+        # Seules les pieces encore validees changent de statut : une piece
+        # deja exportee le reste, avec sa date d'export d'origine.
+        d = d[d["statut"] == "validee"] if len(d) else d
         if len(d) == 0:
+            ui.notification_show("Aucune pièce validée à marquer sur cette période.", type="warning")
             return
-        # Corrige le 12/09/2026. La rangee de filtres ajoutee sur e_table est
-        # entierement cote navigateur : elle ne touche ni a_exporter(), ni le
-        # fichier telecharge, ni cet UPDATE. Un comptable qui filtrait la
-        # colonne Journal sur "BQ", voyait trois lignes et cliquait ici
-        # faisait donc passer a "exportee" TOUTES les pieces validees de la
-        # periode - sans les avoir vues et sans qu'elles soient dans aucun
-        # fichier. Le perimetre reste volontairement celui de a_exporter()
-        # (sinon le fichier Sage et les statuts divergeraient), mais il n'est
-        # plus applique en silence : on annonce le nombre exact, on signale
-        # explicitement l'ecart avec ce qui est affiche, et on attend une
-        # confirmation.
+        # Liste figee ici (22/09/2026, M5) : _marquer_confirme() ne la
+        # recalcule pas au moment du clic.
         ids = list(dict.fromkeys(d["id_piece"]))
-        # Corrige le 22/09/2026 (M5) : la liste confirmee par le comptable
-        # est celle-ci, figee ici - _marquer_confirme() ne doit plus la
-        # recalculer au moment du clic.
         ids_a_marquer.set(ids)
         affichees = _pieces_affichees_export()
         avertissement = None
-        if affichees is not None and len(affichees) < len(ids):
+        if affichees is not None and len(set(affichees) & set(ids)) < len(ids):
             avertissement = ui.div(
                 {"class": "ruban att", "style": "margin-top:10px"},
-                f"Un filtre est actif sur le tableau : il n'affiche que {len(affichees)} "
-                f"piece(s) sur les {len(ids)} concernees. Le marquage porte sur la totalite "
-                "de la periode, comme le fichier telecharge - jamais sur le seul filtre "
+                "Un filtre est actif sur le tableau. Le marquage porte sur toutes les pièces "
+                "validées de la période, comme le fichier téléchargé, jamais sur le seul filtre "
                 "d'affichage.")
         ui.modal_show(ui.modal(
-            ui.p(f"{len(ids)} piece(s) vont passer au statut « exportée » et sortir de la "
+            ui.p(f"{len(ids)} pièce(s) vont passer au statut « exportée » et sortir de la "
                  "file d'export."),
             ui.p({"style": "font-size:13px;color:var(--hk-texte-doux)"},
                  "À ne faire qu'une fois le fichier téléchargé et importé dans Sage."),
@@ -2796,22 +2993,17 @@ def server(input, output, session):
             ui.input_action_button("e_marquer_confirmer", "Confirmer le marquage",
                                     icon=ui.tags.i({"class": "bi bi-check2-square"}),
                                     class_="hk-btn-primaire"),
-            title="Marquer comme exportées", easy_close=True))
+            title="Marquer comme exportées", easy_close=True, footer=ui.modal_button("Annuler")))
 
     @reactive.effect
     @reactive.event(input.e_marquer_confirmer)
     def _marquer_confirme():
-        # Le bouton de confirmation vit dans une fenetre modale : meme filet
-        # de securite que _marquer, rejoue ici.
         if not est_comptable():
             ui.notification_show("Action réservée au comptable.", type="error")
             return
         ui.modal_remove()
-        # Corrige le 22/09/2026 (M5 de l'audit du 18/09) : on reprend la
-        # liste figee au moment de l'affichage de la modale, jamais un nouvel
-        # appel a a_exporter() - qui pouvait differer de ce qui a ete montre
-        # au comptable si une piece etait validee entre les deux.
         ids = ids_a_marquer()
+        ids_a_marquer.set([])
         if not ids:
             return
         try:
@@ -2819,15 +3011,12 @@ def server(input, output, session):
         except Exception as e:
             ui.notification_show(str(e), type="error")
             return
-        # marquer_exporte ne marque que les pieces 'validee' et renvoie le
-        # nombre reel : on annonce ce chiffre, pas len(ids), et on signale
-        # l'ecart plutot que de le passer sous silence.
         if n < len(ids):
             ui.notification_show(
-                f"{n} piece(s) marquee(s) comme exportee(s) sur {len(ids)} : les autres "
-                "n'etaient pas validees et restent en attente.", type="warning", duration=None)
+                f"{n} pièce(s) marquée(s) comme exportée(s) sur {len(ids)} : les autres "
+                "n'étaient plus validées et restent en attente.", type="warning", duration=None)
         else:
-            ui.notification_show(f"{n} piece(s) marquee(s) comme exportee(s)", type="message")
+            ui.notification_show(f"{n} pièce(s) marquée(s) comme exportée(s)", type="message")
         rafraichir()
 
     # ---------------- controles et referentiel --------------------------------
@@ -2846,9 +3035,14 @@ def server(input, output, session):
         # inclure_banque=False pour un non-comptable : un solde de banque
         # negatif ne doit jamais lui etre signale, meme indirectement via une
         # anomalie de Controles - seul le comptable voit ce compte partage.
-        return dl.anomalies(donnees(), ref(),
+        # Seules les pieces pas encore exportees : une piece deja dans Sage ne
+        # se corrige plus ici (extourne), la recontroler a chaque ecriture ne
+        # faisait que ralentir l'onglet (audit du 07/10/2026, M1).
+        d = donnees()
+        d = d[d["statut"] != "exportee"]
+        return dl.anomalies(d, ref(),
                             centre=None if est_comptable() else u["centre"],
-                            inclure_banque=est_comptable())
+                            inclure_banque=est_comptable(), d_soldes=tresorerie())
 
     # Quand des pieces citent un tiers absent du referentiel, il n'y a rien a
     # ressaisir : le code est deja dans les ecritures, il suffit de recreer la
@@ -3261,6 +3455,118 @@ def server(input, output, session):
             ui.notification_show("Soldes d'ouverture enregistrés", type="message")
         panneau_ouvert.set(None)
         rafraichir()
+
+    # ---------------- codes d'acces et clotures (08/10/2026) ---------------------
+
+    def _changer_code_depuis(prefixe_actuel, prefixe_nouveau, prefixe_confirmation):
+        u = util()
+        if u is None:
+            return False
+        nouveau = get_input(prefixe_nouveau, "")
+        if nouveau != get_input(prefixe_confirmation, ""):
+            ui.notification_show("Les deux saisies du nouveau code sont différentes.", type="error")
+            return False
+        try:
+            dl.changer_code(u["identifiant"], get_input(prefixe_actuel, ""), nouveau)
+        except ValueError as e:
+            ui.notification_show(str(e), type="error")
+            return False
+        for cle in (prefixe_actuel, prefixe_nouveau, prefixe_confirmation):
+            ui.update_text(cle, value="")
+        ui.notification_show("Code changé. Utilisez-le dès la prochaine connexion.", type="message")
+        return True
+
+    @reactive.effect
+    @reactive.event(input.r_changer_code)
+    def _changer_mon_code():
+        _changer_code_depuis("r_code_actuel", "r_code_nouveau", "r_code_confirmation")
+
+    @reactive.effect
+    @reactive.event(input.r_reinitialiser_code)
+    def _reinitialiser_code():
+        if not est_comptable():
+            ui.notification_show("Action réservée au comptable.", type="error")
+            return
+        sel = r_utilisateurs.data_view(selected=True)
+        if len(sel) == 0 or "identifiant" not in sel.columns:
+            ui.notification_show("Choisissez d'abord la personne dans le tableau des utilisateurs.",
+                                 type="warning")
+            return
+        ident = str(sel["identifiant"].iloc[0])
+        if ident == util()["identifiant"]:
+            ui.notification_show("Pour votre propre code, utilisez « Changer mon code ».", type="warning")
+            return
+        try:
+            dl.reinitialiser_code(ident, get_input("r_code_provisoire", ""), util()["identifiant"])
+        except ValueError as e:
+            ui.notification_show(str(e), type="error")
+            return
+        ui.update_text("r_code_provisoire", value="")
+        ui.notification_show(f"Code de {ident} réinitialisé : il devra le changer à sa prochaine connexion.",
+                             type="message", duration=8)
+
+    version_clotures = reactive.value(0)
+
+    @render.ui
+    def r_clotures():
+        if not est_comptable():
+            return None
+        version_clotures()
+        rev_ecritures()
+        clos = dl.mois_clotures()
+        dernier = clos["mois"].iloc[-1] if len(clos) else None
+        # Le mois propose : le plus ancien mois non cloture qui a des pieces.
+        d = donnees()
+        mois_pieces = sorted(set(pd.to_datetime(d["date_piece"]).dt.strftime("%Y-%m"))) if len(d) else []
+        ouverts = [m for m in mois_pieces if m not in set(clos["mois"]) and m < date.today().strftime("%Y-%m")]
+        noms = {m: f"{md.MOIS_FR[int(m[5:]) - 1].capitalize()} {m[:4]}" for m in ouverts}
+        elements = [ui.p({"class": "aide"},
+                         "Mois clôturés : " + (", ".join(
+                             f"{md.MOIS_FR[int(m[5:]) - 1].lower()} {m[:4]}" for m in clos["mois"])
+                             if len(clos) else "aucun pour l'instant."))]
+        if ouverts:
+            elements += [ui.input_select("r_mois_cloture", "Mois à clôturer", choices=noms),
+                         ui.input_action_button("r_cloturer", "Clôturer ce mois",
+                                                icon=ui.tags.i({"class": "bi bi-lock"}),
+                                                class_="hk-btn-secondaire")]
+        if dernier:
+            elements += [ui.input_action_button(
+                "r_rouvrir", f"Rouvrir {md.MOIS_FR[int(dernier[5:]) - 1].lower()} {dernier[:4]}",
+                icon=ui.tags.i({"class": "bi bi-unlock"}), class_="hk-btn-secondaire")]
+        return ui.TagList(*elements)
+
+    @reactive.effect
+    @reactive.event(input.r_cloturer)
+    def _cloturer_mois():
+        if not est_comptable():
+            ui.notification_show("Action réservée au comptable.", type="error")
+            return
+        mois = get_input("r_mois_cloture")
+        try:
+            dl.cloturer_mois(mois, util()["identifiant"])
+        except ValueError as e:
+            ui.notification_show(str(e), type="error", duration=None)
+            return
+        version_clotures.set(version_clotures() + 1)
+        ui.notification_show(f"Mois {mois} clôturé.", type="message")
+
+    @reactive.effect
+    @reactive.event(input.r_rouvrir)
+    def _rouvrir_mois():
+        if not est_comptable():
+            ui.notification_show("Action réservée au comptable.", type="error")
+            return
+        clos = dl.mois_clotures()
+        if len(clos) == 0:
+            return
+        mois = clos["mois"].iloc[-1]
+        try:
+            dl.rouvrir_mois(mois, util()["identifiant"])
+        except ValueError as e:
+            ui.notification_show(str(e), type="error")
+            return
+        version_clotures.set(version_clotures() + 1)
+        ui.notification_show(f"Mois {mois} rouvert. Pensez à le clôturer de nouveau.", type="warning")
 
     @reactive.effect
     @reactive.event(input.r_nouvelle_annee)

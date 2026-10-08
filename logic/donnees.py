@@ -25,11 +25,11 @@ import contextlib
 import json
 import logging
 import os
-import random
 import re
 import unicodedata
+import uuid
 import warnings
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 
 import bcrypt
@@ -142,6 +142,22 @@ COLONNES = [
 # mouvement d'argent d'une caisse a une autre - approvisionnement de la CMD,
 # versement en banque, et transfert d'un centre vers un autre.
 COMPTE_VIREMENTS_FONDS = "585000"
+
+# Le "centre" Siege ne sert qu'a connecter le comptable : ce n'est pas un
+# centre, il n'a ni caisse ni eleves. Ses saisies vont toujours au centre
+# concerne (08/10/2026, audit du 07/10, M7).
+CENTRE_SIEGE = "SIE"
+
+
+def centres_reels(ref):
+    """{code: intitule} des centres actifs qui tiennent une caisse (le Siege exclu)."""
+    cx = ref["centres"]
+    if "actif" in cx.columns:
+        cx = cx[cx["actif"].fillna("oui") == "oui"]
+    cx = cx[cx["code_centre"] != CENTRE_SIEGE]
+    if "ordre" in cx.columns:
+        cx = cx.sort_values(["ordre", "intitule"])
+    return dict(zip(cx["code_centre"], cx["intitule"]))
 MODELE_TRANSFERT_INTERNE = "transfert_interne"
 
 # --- utilitaires (identiques a la version Excel : aucune dependance au stockage) --
@@ -176,7 +192,11 @@ def lire_referentiel():
             "libelles": _lire_df("SELECT compte, libelle, frequence FROM libelles_types ORDER BY id", conn=c),
             "journaux": _lire_df("SELECT * FROM journaux ORDER BY journal", conn=c),
             "centres": _lire_df("SELECT * FROM centres ORDER BY code_centre", conn=c),
-            "utilisateurs": _lire_df("SELECT * FROM utilisateurs ORDER BY identifiant", conn=c),
+            # Jamais code_acces (hash) ni le compteur d'essais : rien a faire
+            # dans la memoire de chaque session (audit du 07/10/2026, M9).
+            "utilisateurs": _lire_df(
+                "SELECT identifiant, nom, role, centre, actif FROM utilisateurs ORDER BY identifiant",
+                conn=c),
             # Solde d'ouverture des caisses physiques (CP, CMD), un par
             # centre : voir solde_caisse() plus bas, qui l'utilise a la place
             # de journaux.solde_ouverture pour ces deux journaux uniquement.
@@ -356,6 +376,10 @@ def verifier_code_acces(code_saisi, valeur_stockee):
     bcrypt ou encore un code en clair (compte pas encore migre)."""
     code_saisi = str(code_saisi or "")
     valeur_stockee = str(valeur_stockee or "")
+    # '!' (ou toute valeur commencant par '!') : compte volontairement sans
+    # code utilisable. Aucun code saisi ne doit l'ouvrir, pas meme "!".
+    if not valeur_stockee.strip() or valeur_stockee.startswith("!"):
+        return False
     if _code_est_hache(valeur_stockee):
         try:
             return bcrypt.checkpw(code_saisi.encode("utf-8"), valeur_stockee.encode("utf-8"))
@@ -388,14 +412,14 @@ def tenter_connexion(identifiant, centre, code):
         # autre utilisateur pendant ce temps.
         cur.execute(
             "SELECT identifiant, nom, role, centre, code_acces, actif, "
-            "tentatives_echouees, verrouille_jusqu_a, now() FROM utilisateurs "
+            "tentatives_echouees, verrouille_jusqu_a, now(), doit_changer_code FROM utilisateurs "
             "WHERE lower(identifiant) = %s AND centre = %s FOR UPDATE",
             (identifiant, centre))
         row = cur.fetchone()
         if row is None:
             return ("code", None, 0)
         (ident, nom, role, centre_u, code_stocke, actif,
-         tentatives, verrouille_jusqu_a, maintenant) = row
+         tentatives, verrouille_jusqu_a, maintenant, doit_changer) = row
 
         if verrouille_jusqu_a is not None and verrouille_jusqu_a > maintenant:
             minutes = max(1, int((verrouille_jusqu_a - maintenant).total_seconds() // 60) + 1)
@@ -432,7 +456,63 @@ def tenter_connexion(identifiant, centre, code):
             logger.info("Code d'acces de %s migre vers bcrypt.", ident)
         logger.info("Connexion de %s (centre %s, role %s).", ident, centre_u, role)
         return ("ok", {"identifiant": ident, "nom": nom, "role": role,
-                        "centre": centre_u, "actif": "oui"}, 0)
+                        "centre": centre_u, "actif": "oui",
+                        "doit_changer_code": bool(doit_changer)}, 0)
+
+
+# --- gestion des codes d'acces (audit du 07/10/2026, M9) -------------------------
+
+CODE_LONGUEUR_MIN = 6
+
+
+def _verifier_nouveau_code(code):
+    code = str(code or "").strip()
+    if len(code) < CODE_LONGUEUR_MIN:
+        raise ValueError(f"Le code doit comporter au moins {CODE_LONGUEUR_MIN} caracteres.")
+    if len(set(code)) == 1 or code in ("123456", "1234567", "12345678", "654321", "azerty", "000000"):
+        raise ValueError("Ce code est trop facile a deviner : choisissez-en un autre.")
+    return code
+
+
+def changer_code(identifiant, ancien, nouveau):
+    """Chacun change son propre code, en donnant l'ancien."""
+    nouveau = _verifier_nouveau_code(nouveau)
+    with _connexion() as c, c.cursor() as cur:
+        cur.execute("SELECT code_acces FROM utilisateurs WHERE lower(identifiant) = lower(%s) FOR UPDATE",
+                    (identifiant,))
+        r = cur.fetchone()
+        if not r or not verifier_code_acces(ancien, r[0]):
+            raise ValueError("Le code actuel est incorrect.")
+        if verifier_code_acces(nouveau, r[0]):
+            raise ValueError("Le nouveau code doit etre different de l'ancien.")
+        cur.execute("UPDATE utilisateurs SET code_acces = %s, doit_changer_code = false, updated_at = now() "
+                    "WHERE lower(identifiant) = lower(%s)", (_hacher_code(nouveau), identifiant))
+    logger.info("Code d'acces change par %s.", identifiant)
+
+
+def reinitialiser_code(identifiant, code_provisoire, par):
+    """Le comptable donne un code provisoire, a changer a la connexion
+    suivante. Le compte est aussi deverrouille."""
+    code_provisoire = _verifier_nouveau_code(code_provisoire)
+    with _connexion() as c, c.cursor() as cur:
+        cur.execute("UPDATE utilisateurs SET code_acces = %s, doit_changer_code = true, "
+                    "tentatives_echouees = 0, verrouille_jusqu_a = NULL, updated_at = now() "
+                    "WHERE lower(identifiant) = lower(%s)", (_hacher_code(code_provisoire), identifiant))
+        if cur.rowcount == 0:
+            raise ValueError("Utilisateur introuvable.")
+    logger.warning("Code d'acces de %s reinitialise par %s.", identifiant, par)
+
+
+def definir_code(identifiant, code):
+    """Pose un code sans connaitre l'ancien. Reserve a outils/definir_code.py
+    (ligne de commande sur le serveur), jamais appele par l'application."""
+    code = _verifier_nouveau_code(code)
+    with _connexion() as c, c.cursor() as cur:
+        cur.execute("UPDATE utilisateurs SET code_acces = %s, doit_changer_code = false, "
+                    "tentatives_echouees = 0, verrouille_jusqu_a = NULL, updated_at = now() "
+                    "WHERE lower(identifiant) = lower(%s)", (_hacher_code(code), identifiant))
+        if cur.rowcount == 0:
+            raise ValueError("Utilisateur introuvable.")
 
 
 def ajouter_tiers(code, intitule, collectif, par=None):
@@ -458,11 +538,14 @@ def ajouter_tiers(code, intitule, collectif, par=None):
         code = pref + code
     elif not code.startswith(pref):
         raise ValueError(f"Un tiers rattache au collectif {collectif} doit avoir un code "
-                         f"commencant par {pref} (ex. {pref}{_slug(intitule)}).")
+                         f"commencant par {pref} (ex. {pref}{_slug(intitule, _place_nom(pref))}).")
     if len(code) <= 3:
         raise ValueError("Le code tiers doit contenir un nom apres le prefixe.")
     if not re.fullmatch(r"[0-9A-Z_-]+", code):
         raise ValueError("Le code tiers ne doit contenir que des lettres sans accent et des chiffres.")
+    if len(code) > LONGUEUR_CODE_TIERS:
+        raise ValueError(f"Le code tiers ne doit pas depasser {LONGUEUR_CODE_TIERS} caracteres "
+                         f"(Sage le tronquerait) : {code} en compte {len(code)}.")
     with _connexion() as c, c.cursor() as cur:
         cur.execute("SELECT 1 FROM tiers WHERE upper(code_tiers) = upper(%s)", (code,))
         if cur.fetchone():
@@ -480,6 +563,17 @@ def ajouter_tiers(code, intitule, collectif, par=None):
 # Meme logique qu'en version Excel : un nom qui correspond deja a un code ou
 # un intitule connu (actif ou non) sous le meme prefixe est repris tel quel,
 # jamais duplique ; sinon un nouveau code est genere selon la convention.
+
+
+# Longueur des comptes tiers du dossier Sage (voir sage-parametrage-complet.md,
+# partie A). Au-dela, Sage tronque en silence et deux tiers differents peuvent
+# finir sur le meme compte. Deux caracteres sont gardes pour le suffixe de
+# dedoublonnage (2, 3...) d'un code genere.
+LONGUEUR_CODE_TIERS = 17
+
+
+def _place_nom(pref):
+    return LONGUEUR_CODE_TIERS - len(pref) - 2
 
 
 def _slug(nom, longueur_max=18):
@@ -502,12 +596,12 @@ def code_tiers_candidat(valeur, pref, ref):
     m = sous[sous["intitule"].str.upper() == valeur.upper()]
     if len(m):
         return m.iloc[0]["code_tiers"]
-    base = pref + _slug(valeur)
+    base = pref + _slug(valeur, _place_nom(pref))
     code = base
     existants = set(sous["code_tiers"].str.upper())
     n = 2
     while code.upper() in existants:
-        code = f"{base}{n}"
+        code = f"{base[:LONGUEUR_CODE_TIERS - len(str(n))]}{n}"
         n += 1
     return code
 
@@ -555,11 +649,11 @@ def resoudre_tiers(valeur, pref, collectif):
                     return code
 
             existants = {code.upper() for code, _, _ in lignes}
-            base = pref + _slug(valeur)
+            base = pref + _slug(valeur, _place_nom(pref))
             code = base
             n = 2
             while code.upper() in existants:
-                code = f"{base}{n}"
+                code = f"{base[:LONGUEUR_CODE_TIERS - len(str(n))]}{n}"
                 n += 1
             type_ = TYPES_COLLECTIF.get(collectif, "client")
             cur.execute(
@@ -627,7 +721,14 @@ def _normaliser_lecture(df):
     return d[COLONNES].reset_index(drop=True)
 
 
-def lire_ecritures(centre=None, mois=None):
+def lire_ecritures(centre=None, mois=None, fenetre=None, du=None, au=None):
+    """Lignes d'ecriture, triees par date puis piece.
+
+    fenetre (date) : les lignes datees a partir de cette date, PLUS toute
+    piece pas encore exportee quelle que soit sa date (audit du 07/10/2026,
+    M1). C'est ce que les ecrans de travail ont besoin de voir ; l'historique
+    exporte se relit a la demande avec du/au. Les soldes de caisse ne passent
+    jamais par cette fenetre (voir mouvements_tresorerie)."""
     where, params = [], []
     if centre:
         where.append("centre = %s")
@@ -635,9 +736,39 @@ def lire_ecritures(centre=None, mois=None):
     if mois:
         where.append("to_char(date_piece, 'YYYYMM') = %s")
         params.append(mois)
+    if fenetre:
+        where.append("(date_piece >= %s OR statut <> 'exportee')")
+        params.append(fenetre)
+    if du:
+        where.append("date_piece >= %s")
+        params.append(du)
+    if au:
+        where.append("date_piece <= %s")
+        params.append(au)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     sql = f"SELECT * FROM ecritures {clause} ORDER BY date_piece, id_piece"
     return _normaliser_lecture(_lire_df(sql, params=params or None))
+
+
+def debut_fenetre(aujourd_hui=None):
+    """Debut de la fenetre de travail : le 1er janvier de l'annee en cours."""
+    return (aujourd_hui or date.today()).replace(month=1, day=1)
+
+
+def mouvements_tresorerie():
+    """Mouvements cumules de tous les temps, par compte de tresorerie et par
+    centre : (compte, centre, debit, credit). Quelques dizaines de lignes,
+    quel que soit l'historique. Se passe a solde_caisse() et
+    controler_soldes() a la place des ecritures : memes colonnes, meme
+    resultat, sans charger l'historique."""
+    df = _lire_df(
+        "SELECT e.compte, e.centre, sum(e.debit)::float AS debit, sum(e.credit)::float AS credit "
+        "FROM ecritures e WHERE e.compte IN (SELECT compte_contrepartie FROM journaux "
+        "WHERE compte_contrepartie IS NOT NULL) GROUP BY e.compte, e.centre")
+    if len(df) == 0:
+        return pd.DataFrame({"compte": pd.Series(dtype=object), "centre": pd.Series(dtype=object),
+                             "debit": pd.Series(dtype=float), "credit": pd.Series(dtype=float)})
+    return df
 
 
 def mois_de(date_piece):
@@ -755,6 +886,29 @@ def _metadonnees_transfert(cur, centre, modele, valeurs, date_piece, ancienne=No
     return _sortie_a_apparier(cur, donateur, destinataire), donateur
 
 
+def _verifier_motif_transfert(cur, centre, modele, valeurs, reference):
+    """Le centre qui recoit doit donner le meme motif que le centre qui a
+    remis l'argent (08/10/2026, audit du 07/10, M5). Sans ce controle, Tampouy
+    pouvait enregistrer un pret que le SIAO enregistrait comme contribution :
+    le tableau de bord classait alors la meme somme de deux facons. Une sortie
+    saisie avant le 07/10/2026 n'a pas de motif : rien a comparer."""
+    if modele != MODELE_TRANSFERT_INTERNE or not reference or not valeurs:
+        return
+    if centre == str(valeurs.get("centre_donateur") or "").strip():
+        return  # c'est la sortie elle-meme
+    cur.execute("SELECT valeurs_json->>'motif' FROM ecritures WHERE reference_transfert = %s "
+                "AND compte = %s AND debit > 0 LIMIT 1", (reference, COMPTE_VIREMENTS_FONDS))
+    r = cur.fetchone()
+    motif_sortie = (r[0] or "") if r else ""
+    motif_entree = str(valeurs.get("motif") or "")
+    if motif_sortie and motif_sortie != motif_entree:
+        libelles = md.MOTIFS_TRANSFERT
+        raise ValueError(
+            f"Le centre qui a remis l'argent a enregistre ce transfert comme « "
+            f"{libelles.get(motif_sortie, motif_sortie)} ». Choisissez le meme motif, ou "
+            "voyez avec lui lequel est juste.")
+
+
 def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs,
                        ancienne_ref=None, reserves=None):
     """Insere les lignes d'une operation dans la transaction du curseur recu,
@@ -764,7 +918,10 @@ def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, not
     ecriture neuve ET suppression de l'ancienne, dans LA MEME transaction)."""
     mois = mois_de(date_piece)
     horo = datetime.now().strftime("%Y%m%d%H%M%S")
-    lien = f"L{horo}-{random.randint(100, 999)}" if len(pieces) > 1 else ""
+    # Suffixe aleatoire de 8 caracteres hexadecimaux (08/10/2026) : avec 3
+    # chiffres, deux operations liees enregistrees dans la meme seconde par
+    # deux centres avaient une chance sur 900 de partager leur lien.
+    lien = f"L{horo}-{uuid.uuid4().hex[:8]}" if len(pieces) > 1 else ""
     v_json = None
     if valeurs:
         try:
@@ -774,13 +931,18 @@ def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, not
     nums = []
     reference, contrepartie = _metadonnees_transfert(cur, centre, modele, valeurs, date_piece,
                                                      ancienne=ancienne_ref)
+    _verifier_motif_transfert(cur, centre, modele, valeurs, reference)
     # reserves : {journal: [numeros]} gardes par une piece corrigee (voir
     # remplacer_piece). Chaque numero n'est rendu qu'une fois.
     reserves = {j: list(v) for j, v in (reserves or {}).items()}
     for i_p, p in enumerate(pieces):
         n = _prochain_numero(cur, f"prov:{centre}:{mois}")
         num = f"{centre}-{mois[2:6]}-{n:03d}"
-        idp = f"{centre}-{horo}-{n}"
+        # Le mois fait partie de l'identifiant (08/10/2026) : le compteur n
+        # est par centre ET par mois, deux pieces du meme centre saisies dans
+        # la meme seconde pour deux mois differents recevaient toutes deux
+        # n=1, donc le meme identifiant, et la seconde etait refusee.
+        idp = f"{centre}-{horo}-{mois[2:6]}{n:03d}"
         dispo = reserves.get(p["journal"]) or []
         reserve = dispo.pop(0) if dispo else ""
         L = p["lignes"].reset_index(drop=True)
@@ -799,6 +961,73 @@ def _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, not
     return nums
 
 
+# --- dates et periodes cloturees ---------------------------------------------------
+#
+# Audit du 07/10/2026 (M3). Une operation de caisse a deja eu lieu : une date
+# a plus de JOURS_AVANCE_MAX jours dans le futur est une faute de frappe
+# (2062 au lieu de 2026). Un mois cloture par le comptable ne recoit plus
+# rien : c'est ce qui garde l'application et Sage d'accord sur le passe. La
+# base applique la meme regle (trigger proteger_ecritures) ; ce controle-ci
+# donne seulement un message lisible avant d'y arriver.
+
+JOURS_AVANCE_MAX = 7
+
+# Date du jour, remplacable par les tests (leurs pieces sont datees de 2098
+# ou 2099 pour ne jamais se meler a des donnees reelles).
+_aujourd_hui = date.today
+
+
+def _en_date(d):
+    return pd.Timestamp(d).date()
+
+
+def mois_clotures(conn=None):
+    """Mois clotures, ['2026-03', ...], du plus ancien au plus recent."""
+    df = _lire_df("SELECT mois, cloture_par, cloture_le FROM periodes_cloturees ORDER BY mois", conn=conn)
+    return df
+
+
+def verifier_date_piece(cur, date_piece, aujourd_hui=None):
+    j = _en_date(date_piece)
+    aujourd_hui = aujourd_hui or _aujourd_hui()
+    if j > aujourd_hui + timedelta(days=JOURS_AVANCE_MAX):
+        raise ValueError(
+            f"Date du {j:%d/%m/%Y} refusee : une operation ne peut pas etre datee de plus de "
+            f"{JOURS_AVANCE_MAX} jours apres aujourd'hui. Verifiez l'annee.")
+    cur.execute("SELECT 1 FROM periodes_cloturees WHERE mois = %s", (j.strftime("%Y-%m"),))
+    if cur.fetchone():
+        raise ValueError(
+            f"Le mois de {j:%m/%Y} est cloture par le comptable : aucune piece ne peut plus y "
+            "etre enregistree. Datez l'operation dans un mois ouvert, ou demandez la reouverture.")
+
+
+def cloturer_mois(mois, utilisateur):
+    """Cloture un mois 'AAAA-MM'. Refuse s'il reste des pieces non exportees
+    dans ce mois : on ne fige pas un mois qui n'est pas encore dans Sage."""
+    if not re.fullmatch(r"\d{4}-\d{2}", str(mois or "")):
+        raise ValueError("Mois invalide.")
+    with _connexion() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT count(DISTINCT id_piece) FROM ecritures "
+            "WHERE to_char(date_piece, 'YYYY-MM') = %s AND statut <> 'exportee'", (mois,))
+        reste = cur.fetchone()[0]
+        if reste:
+            raise ValueError(
+                f"{reste} piece(s) de ce mois ne sont pas encore exportees vers Sage : "
+                "validez-les et exportez-les avant de cloturer.")
+        cur.execute("INSERT INTO periodes_cloturees (mois, cloture_par) VALUES (%s, %s) "
+                    "ON CONFLICT (mois) DO NOTHING", (mois, utilisateur))
+    logger.info("Mois %s cloture par %s.", mois, utilisateur)
+
+
+def rouvrir_mois(mois, utilisateur):
+    with _connexion() as c, c.cursor() as cur:
+        cur.execute("DELETE FROM periodes_cloturees WHERE mois = %s", (mois,))
+        if cur.rowcount == 0:
+            raise ValueError("Ce mois n'est pas cloture.")
+    logger.warning("Mois %s ROUVERT par %s.", mois, utilisateur)
+
+
 def enregistrer_operation(pieces, centre, date_piece, modele, utilisateur, note="", valeurs=None):
     # Corrige le 22/09/2026 (M2 de l'audit du 18/09) : l'equilibre debit/
     # credit n'etait verifie que cote app.py, avant l'appel. Un appel direct
@@ -810,6 +1039,7 @@ def enregistrer_operation(pieces, centre, date_piece, modele, utilisateur, note=
         raise ValueError(
             "Operation desequilibree ou incomplete : aucune ecriture n'a ete enregistree.")
     with _connexion() as c, c.cursor() as cur:
+        verifier_date_piece(cur, date_piece)
         nums = _inserer_operation(cur, pieces, centre, date_piece, modele, utilisateur, note, valeurs)
     logger.info("Piece(s) enregistree(s) par %s (centre %s, modele %s) : %s",
                 utilisateur, centre, modele, ", ".join(nums))
@@ -843,6 +1073,7 @@ def remplacer_piece(ancien_id, pieces, centre, date_piece, modele, utilisateur, 
         raise ValueError(
             "Operation desequilibree ou incomplete : aucune ecriture n'a ete enregistree.")
     with _connexion() as c, c.cursor() as cur:
+        verifier_date_piece(cur, date_piece)
         ids = _ids_lies(cur, [ancien_id])
         cur.execute("SELECT id_piece, statut, centre, modele, reference_transfert, centre_contrepartie "
                     "FROM ecritures WHERE id_piece = ANY(%s) FOR UPDATE", (ids,))
@@ -984,6 +1215,14 @@ def valider_pieces(ids, utilisateur, autoriser_attente=False):
     """
     with _connexion() as c, c.cursor() as cur:
         ids = _ids_lies(cur, ids)
+        # Verrou sur les lignes AVANT de lire leur statut (audit du 07/10/2026,
+        # M2). Sans lui, deux validateurs qui validaient le meme lot au meme
+        # instant lisaient tous deux 'saisie', tiraient chacun un numero, et
+        # le second ecrasait le premier : numeros perdus (trous dans le
+        # journal) et deux personnes a qui l'on disait "valide". Le second
+        # attend desormais la fin du premier, puis trouve les pieces deja
+        # validees et les ecarte.
+        cur.execute("SELECT 1 FROM ecritures WHERE id_piece = ANY(%s) ORDER BY id_ligne FOR UPDATE", (ids,))
         # On lit TOUTES les pieces demandees, pas seulement les validables :
         # c'est ce qui permet de dire pourquoi les autres sont ecartees.
         # 25/09/2026 : les numeros suivent la DATE, puis le CENTRE (ordre
@@ -1044,8 +1283,13 @@ def valider_pieces(ids, utilisateur, autoriser_attente=False):
                 num_def = f"{debut}{n:03d}"
             cur.execute(
                 "UPDATE ecritures SET num_definitif = %s, num_reserve = '', statut = 'validee', "
-                "valide_par = %s, valide_le = now() WHERE id_piece = %s",
+                "valide_par = %s, valide_le = now() WHERE id_piece = %s AND statut = 'saisie'",
                 (num_def, utilisateur, idp))
+            if cur.rowcount == 0:
+                # Impossible sous le verrou ci-dessus ; garde-fou si le code
+                # change : on n'annonce jamais une validation qui n'a pas eu lieu.
+                raise RuntimeError(f"La piece {idp} a change de statut pendant la validation : "
+                                   "rien n'a ete valide, reessayez.")
             validees.append(idp)
     if ignorees:
         logger.info("%s piece(s) validee(s) par %s ; %s ecartee(s) : %s.",
@@ -1244,80 +1488,110 @@ def mouvements_caisse(d, ref):
 
 
 def controler(d, ref, d_complet=None):
+    """Anomalies des pieces de `d`, une ligne par anomalie, dans l'ordre des
+    pieces puis des controles.
+
+    Reecrite le 08/10/2026 (audit du 07/10, M1) : memes controles, memes
+    messages, meme ordre, mais calcules colonne par colonne sur toutes les
+    pieces a la fois au lieu d'une boucle pandas par piece. Mesure sur
+    25 000 pieces : 52 s avant, moins d'une seconde apres. La boucle finale
+    ne fait plus que lire des dictionnaires.
+
+    Ajout : un code tiers de plus de LONGUEUR_CODE_TIERS caracteres est
+    bloquant (Sage le tronquerait)."""
     if d_complet is None:
         d_complet = d
-    rows = []
     if len(d) == 0:
         return pd.DataFrame(columns=["gravite", "piece", "anomalie"])
 
-    # Ces calculs ne dependent que du referentiel, jamais de la piece en
-    # cours : les sortir de la boucle evite de les refaire une fois par
-    # piece. Corrige le 13/09/2026 - mesure sur 992 pieces (hakili_verif) :
-    # controler() passe de 2,8s a 0,35s, memes controles, memes messages,
-    # meme ordre de sortie (groupby(sort=False) preserve l'ordre
-    # d'apparition, comme le faisait id_piece.unique()).
     jx = ref["journaux"]
-    tres = jx.loc[jx.get("type", "tresorerie").eq("tresorerie") if "type" in jx.columns
-                  else jx["journal"].notna(), "compte_contrepartie"]
-    tresorerie_par_journal = (jx.set_index("journal")["type"].eq("tresorerie")
-                               if "type" in jx.columns else None)
+    tres = set(jx.loc[jx.get("type", "tresorerie").eq("tresorerie") if "type" in jx.columns
+                      else jx["journal"].notna(), "compte_contrepartie"].dropna())
+    tresorerie_par_journal = (dict(zip(jx["journal"], jx["type"].eq("tresorerie")))
+                              if "type" in jx.columns else None)
     comptes_connus = set(ref["comptes"]["compte"])
     obl = set(ref["comptes"].loc[ref["comptes"]["tiers_obligatoire"] == "oui", "compte"])
     tiers_connus = set(ref["tiers"]["code_tiers"])
     prefixes = {j: prefixe_piece(j, ref) for j in jx["journal"]}
 
-    for idp, p in d.groupby("id_piece", sort=False):
-        num = ou(p["num_definitif"].iloc[0], p["num_provisoire"].iloc[0])
-        if round(p["debit"].sum()) != round(p["credit"].sum()):
-            rows.append(("bloquante", num,
-                         f"Piece desequilibree : {fcfa(p['debit'].sum())} au debit contre "
-                         f"{fcfa(p['credit'].sum())} au credit."))
-        j_piece = p["journal"].iloc[0]
-        est_tresorerie = tresorerie_par_journal is None or bool(tresorerie_par_journal.get(j_piece, False))
-        if est_tresorerie and not p["compte"].isin(tres).any():
-            rows.append(("bloquante", num, "Aucune ligne de caisse : la piece ne mouvemente pas la tresorerie."))
-        inc = sorted(set(p["compte"]) - comptes_connus)
-        if inc:
-            rows.append(("bloquante", num, f"Compte absent du plan de comptes : {', '.join(inc)}."))
-        manque = p[p["compte"].isin(obl) & (p["code_tiers"] == "")]
-        if len(manque) > 0:
-            rows.append(("bloquante", num,
-                         f"Compte {', '.join(sorted(manque['compte'].unique()))} sans code tiers : "
+    d = d.reset_index(drop=True)
+    idp = d["id_piece"]
+    ordre = list(dict.fromkeys(idp))
+    premiere = d.groupby("id_piece", sort=False).first()
+    prem = premiere.to_dict("index")
+    num = {i: ou(r["num_definitif"], r["num_provisoire"]) for i, r in prem.items()}
+
+    def _par_piece(masque, colonne):
+        """{id_piece: liste triee des valeurs de `colonne` sur les lignes du masque}."""
+        sous = d.loc[masque, ["id_piece", colonne]]
+        return {i: sorted(set(g)) for i, g in sous.groupby("id_piece", sort=False)[colonne]}
+
+    sommes = d.groupby("id_piece", sort=False)[["debit", "credit"]].sum()
+    desequilibre = sommes[sommes["debit"].round() != sommes["credit"].round()]
+    a_caisse = set(idp[d["compte"].isin(tres)])
+    inconnus = _par_piece(~d["compte"].isin(comptes_connus), "compte")
+    sans_tiers = _par_piece(d["compte"].isin(obl) & (d["code_tiers"] == ""), "compte")
+    cle = d["compte"] + "|" + d["code_tiers"]
+    deb = set(zip(idp[d["debit"] > 0], cle[d["debit"] > 0]))
+    cre = set(zip(idp[d["credit"] > 0], cle[d["credit"] > 0]))
+    annules = {}
+    for i, c in deb & cre:
+        annules.setdefault(i, set()).add(c.split("|")[0])
+    avec_tiers = d["code_tiers"] != ""
+    tiers_inc = _par_piece(avec_tiers & ~d["code_tiers"].isin(tiers_connus), "code_tiers")
+    tiers_longs = _par_piece(avec_tiers & (d["code_tiers"].str.len() > LONGUEUR_CODE_TIERS), "code_tiers")
+    sans_libelle = set(idp[d["libelle"] == ""])
+    attente = set(idp[d["compte"] == md.COMPTE_ATTENTE])
+
+    rows = []
+    for i in ordre:
+        n = num[i]
+        p = prem[i]
+        if i in desequilibre.index:
+            rows.append(("bloquante", n,
+                         f"Piece desequilibree : {fcfa(desequilibre.at[i, 'debit'])} au debit contre "
+                         f"{fcfa(desequilibre.at[i, 'credit'])} au credit."))
+        est_tresorerie = (tresorerie_par_journal is None
+                          or bool(tresorerie_par_journal.get(p["journal"], False)))
+        if est_tresorerie and i not in a_caisse:
+            rows.append(("bloquante", n, "Aucune ligne de caisse : la piece ne mouvemente pas la tresorerie."))
+        if i in inconnus:
+            rows.append(("bloquante", n, f"Compte absent du plan de comptes : {', '.join(inconnus[i])}."))
+        if i in sans_tiers:
+            rows.append(("bloquante", n,
+                         f"Compte {', '.join(sans_tiers[i])} sans code tiers : "
                          "le lettrage sera impossible dans Sage."))
-        cle = p["compte"] + "|" + p["code_tiers"]
-        vide = sorted({x.split("|")[0] for x in
-                       set(cle[p["debit"] > 0]) & set(cle[p["credit"] > 0])})
-        if vide:
-            rows.append(("bloquante", num,
-                         f"Compte {', '.join(vide)} debite et credite pour le meme tiers : "
+        if i in annules:
+            rows.append(("bloquante", n,
+                         f"Compte {', '.join(sorted(annules[i]))} debite et credite pour le meme tiers : "
                          "les deux lignes s'annulent, la piece n'a aucun effet comptable."))
-        tinc = sorted(set(p.loc[p["code_tiers"] != "", "code_tiers"]) - tiers_connus)
-        if tinc:
-            rows.append(("bloquante", num,
-                         f"Tiers inconnu : {', '.join(tinc)}. A creer dans le referentiel avant l'export."))
-        pref = prefixes.get(j_piece, str(j_piece))
-        if p["num_definitif"].iloc[0] and not str(p["num_definitif"].iloc[0]).startswith(pref):
-            rows.append(("a_verifier", num, f"Numero de piece incoherent avec le journal {j_piece}."))
-        if (p["libelle"] == "").any():
-            rows.append(("a_verifier", num, "Ligne sans libelle."))
-        if md.COMPTE_ATTENTE in set(p["compte"]):
-            # Bloquante tant que la piece n'est pas validee (23/09/2026) : on
-            # ne valide plus une piece sur le compte d'attente, il faut
-            # d'abord trouver le bon compte. Les pieces historiques deja
-            # validees restent signalees, sans bloquer quoi que ce soit.
-            non_validee = p["statut"].iloc[0] in ("saisie", "a_corriger") if "statut" in p.columns else True
-            rows.append(("bloquante" if non_validee else "a_verifier", num,
+        if i in tiers_inc:
+            rows.append(("bloquante", n,
+                         f"Tiers inconnu : {', '.join(tiers_inc[i])}. A creer dans le referentiel avant l'export."))
+        if i in tiers_longs and p.get("statut", "") != "exportee":
+            rows.append(("bloquante", n,
+                         f"Code tiers trop long pour Sage ({LONGUEUR_CODE_TIERS} caracteres au plus) : "
+                         f"{', '.join(tiers_longs[i])}. A renommer avant l'export."))
+        pref = prefixes.get(p["journal"], str(p["journal"]))
+        if p["num_definitif"] and not str(p["num_definitif"]).startswith(pref):
+            rows.append(("a_verifier", n, f"Numero de piece incoherent avec le journal {p['journal']}."))
+        if i in sans_libelle:
+            rows.append(("a_verifier", n, "Ligne sans libelle."))
+        if i in attente:
+            # Bloquante tant que la piece n'est pas validee (23/09/2026) ; les
+            # pieces historiques deja validees restent signalees sans bloquer.
+            non_validee = p["statut"] in ("saisie", "a_corriger") if "statut" in p else True
+            rows.append(("bloquante" if non_validee else "a_verifier", n,
                          f"Compte d'attente ({md.COMPTE_ATTENTE}) utilise : operation a reclasser "
                          "sur le bon compte avant validation (onglet Controles)."))
 
     ap = d[d["modele"] == "approvisionnement"]
     if len(ap) > 0:
-        for idp, p in ap.groupby("id_piece", sort=False):
-            num = ou(p["num_definitif"].iloc[0], p["num_provisoire"].iloc[0])
-            lien = p["id_lien"].iloc[0]
-            seule = (not lien) or (d_complet.loc[d_complet["id_lien"] == lien, "id_piece"].nunique() < 2)
-            if seule:
-                rows.append(("bloquante", num,
+        pieces_par_lien = d_complet[d_complet["id_lien"] != ""].groupby("id_lien")["id_piece"].nunique()
+        for i, p in ap.groupby("id_piece", sort=False).first().iterrows():
+            lien = p["id_lien"]
+            if (not lien) or pieces_par_lien.get(lien, 0) < 2:
+                rows.append(("bloquante", num[i],
                              "Transfert entre caisses sans contrepartie : l'autre caisse n'a pas ete mouvementee."))
 
     return pd.DataFrame(rows, columns=["gravite", "piece", "anomalie"])
@@ -1356,7 +1630,7 @@ def reparer_tiers_manquants(d, ref):
     return crees
 
 
-def anomalies(d, ref, centre=None, inclure_banque=True):
+def anomalies(d, ref, centre=None, inclure_banque=True, d_soldes=None):
     # controler_soldes recoit toujours l'ensemble des ecritures (d_complet),
     # jamais le sous-ensemble filtre par centre ci-dessous : le solde d'une
     # caisse physique doit sommer TOUS les mouvements de ce centre (pas
@@ -1365,10 +1639,14 @@ def anomalies(d, ref, centre=None, inclure_banque=True):
     d_complet = d
     if centre is not None and len(d):
         d = d[d["centre"] == centre]
-    if d is None or len(d) == 0:
-        return pd.DataFrame(columns=["gravite", "piece", "anomalie"])
-    a = controler(d, ref, d)
-    s = controler_soldes(ref, d_complet, centre=centre, inclure_banque=inclure_banque)
+    vide = pd.DataFrame(columns=["gravite", "piece", "anomalie"])
+    if (d is None or len(d) == 0) and d_soldes is None:
+        return vide
+    a = controler(d, ref, d) if d is not None and len(d) else vide
+    # d_soldes : mouvements cumules de tous les temps (mouvements_tresorerie),
+    # quand d n'est qu'une fenetre de l'historique.
+    s = controler_soldes(ref, d_soldes if d_soldes is not None else d_complet,
+                         centre=centre, inclure_banque=inclure_banque)
     return pd.concat([a, s], ignore_index=True)
 
 
@@ -1464,6 +1742,16 @@ def _section_sage(d, ref):
     return col.astype(str).str.strip().str.upper()
 
 
+def _libelle_sage(libelle):
+    """Libelle tel qu'il part dans le fichier Sage : sans point-virgule ni
+    guillemet ni retour a la ligne. Un ";" tape dans un libelle libre etait
+    entoure de guillemets par le CSV ; selon le format d'import Sage, les
+    colonnes suivantes (dont les montants) pouvaient se decaler. Le libelle
+    complet reste intact dans l'application."""
+    t = re.sub(r"[;\"\r\n\t]+", " ", str(libelle or ""))
+    return " ".join(t.split())
+
+
 def format_sage(d, ref):
     if d is None or len(d) == 0:
         return None
@@ -1482,7 +1770,7 @@ def format_sage(d, ref):
         "Piece": d["num_definitif"],
         "Compte": d["compte"],
         "Tiers": d["code_tiers"],
-        "Libelle": d["libelle"],
+        "Libelle": d["libelle"].map(_libelle_sage),
         "Debit": d["debit"].apply(lambda x: f"{x:.2f}".replace(".", ",")),
         "Credit": d["credit"].apply(lambda x: f"{x:.2f}".replace(".", ",")),
         "Section": _section_sage(d, ref),
@@ -1501,7 +1789,29 @@ def ecrire_fichier_sage(x, chemin):
               errors="replace", na_rep="", lineterminator="\r\n")
 
 
+def texte_fichier_sage(x):
+    """Contenu du fichier d'import Sage (bytes cp1252), meme format que
+    ecrire_fichier_sage(). errors="replace" : un caractere hors cp1252
+    devient "?" au lieu de faire echouer le telechargement entier."""
+    texte = x.to_csv(sep=";", index=False, header=False, lineterminator="\r\n", na_rep="")
+    return texte.encode("cp1252", errors="replace")
+
+
 # --- synchronisation entre postes -------------------------------------------------
+
+
+def revisions_bd():
+    """(revision des ecritures, revision du referentiel), en une requete.
+    Voir sql/migrations/2026-10-08_correctifs_audit.sql : une ecriture ne fait
+    plus relire le referentiel, ni l'inverse."""
+    for tentative in (1, 2):
+        try:
+            with _connexion() as c, c.cursor() as cur:
+                cur.execute("SELECT valeur, referentiel FROM revision")
+                return tuple(cur.fetchone())
+        except (psycopg2.InterfaceError, psycopg2.OperationalError):
+            if tentative == 2:
+                raise
 
 
 def revision_bd():

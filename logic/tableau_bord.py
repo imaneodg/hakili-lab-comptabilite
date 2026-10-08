@@ -73,15 +73,16 @@ def periode_par_defaut(aujourd_hui=None):
 
 def centres_proposes():
     """Les centres qui tiennent une caisse : actifs, et ayant deja des
-    ecritures ou un utilisateur de saisie. Le compte de connexion du
-    comptable (le siege) n'en fait donc pas partie, sans etre nomme."""
+    ecritures ou un utilisateur de saisie. Le Siege (compte de connexion du
+    comptable) n'en fait jamais partie, meme s'il porte d'anciennes pieces
+    saisies avant le 08/10/2026."""
     return dl._lire_df("""
         SELECT c.code_centre, c.intitule FROM centres c
-        WHERE c.actif = 'oui'
+        WHERE c.actif = 'oui' AND c.code_centre <> %s
           AND (EXISTS (SELECT 1 FROM ecritures e WHERE e.centre = c.code_centre)
                OR EXISTS (SELECT 1 FROM utilisateurs u WHERE u.centre = c.code_centre
                           AND u.role = 'saisie' AND u.actif = 'oui'))
-        ORDER BY c.ordre, c.intitule""")
+        ORDER BY c.ordre, c.intitule""", (dl.CENTRE_SIEGE,))
 
 
 def mois_de(debut, fin):
@@ -91,7 +92,19 @@ def mois_de(debut, fin):
 
 # --- lecture ----------------------------------------------------------------------
 
-def _lire(debut, fin, centres):
+def _flux_temporaire(conn, debut, fin, centres):
+    """Calcule flux_tableau_bord UNE fois et le garde dans une table temporaire
+    de la transaction (08/10/2026, audit du 07/10, M1) : le classement ligne
+    par ligne est la partie couteuse, et quatre requetes le refaisaient
+    chacune. Les requetes lisent ensuite tmp_flux_tb, sans rien changer a
+    leur logique."""
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS tmp_flux_tb")
+        cur.execute("CREATE TEMP TABLE tmp_flux_tb ON COMMIT DROP AS "
+                    "SELECT * FROM flux_tableau_bord(%s, %s, %s)", (debut, fin, list(centres)))
+
+
+def _lire(debut, fin, centres, conn):
     centres = list(centres)
     # Les flux, agreges par PostgreSQL. Les frais d'eleves et les vacations
     # gardent leur libelle : le mois du cours et le camp s'y lisent.
@@ -99,9 +112,9 @@ def _lire(debut, fin, centres):
         SELECT centre, mois, rubrique, sens,
                coalesce(contrepartie = ANY(%s) AND contrepartie <> centre, false) AS interne,
                sum(montant)::float AS montant
-        FROM flux_tableau_bord(%s, %s, %s)
+        FROM tmp_flux_tb
         WHERE rubrique NOT IN (%s, %s, %s)
-        GROUP BY 1, 2, 3, 4, 5""", (centres, debut, fin, centres, COURS, CAMP, SALAIRES))
+        GROUP BY 1, 2, 3, 4, 5""", (centres, COURS, CAMP, SALAIRES), conn=conn)
     # camp : le libelle porte un des mots des regles du camp (« CAMP »,
     # FRAIS CV...), pour reconnaitre aussi les vacations du camp. Meme
     # comparaison que flux_tableau_bord() (espace ajoute en fin de libelle).
@@ -111,31 +124,31 @@ def _lire(debut, fin, centres):
                        WHERE c.rubrique = %s
                          AND tb_normaliser(f.libelle) || ' ' LIKE '%%' || tb_normaliser(m) || '%%') AS camp,
                sum(montant)::float AS montant
-        FROM flux_tableau_bord(%s, %s, %s) f
+        FROM tmp_flux_tb f
         WHERE rubrique IN (%s, %s, %s)
         GROUP BY centre, mois, rubrique, sens, date_piece, code_tiers, libelle""",
-                         (CAMP, debut, fin, centres, COURS, CAMP, SALAIRES))
+                         (CAMP, COURS, CAMP, SALAIRES), conn=conn)
     pieces = dl._lire_df("""
         SELECT centre,
                count(DISTINCT id_piece) FILTER (WHERE statut IN %s) AS non_validees,
                count(DISTINCT compte) FILTER (WHERE rubrique = %s) AS non_classes
-        FROM flux_tableau_bord(%s, %s, %s)
+        FROM tmp_flux_tb
         GROUP BY GROUPING SETS ((centre), ())""",
-                         (STATUTS_NON_VALIDES, NON_CLASSE, debut, fin, centres))
-    soldes = dl._lire_df("SELECT * FROM soldes_tableau_bord(%s, %s)", (fin, centres))
+                         (STATUTS_NON_VALIDES, NON_CLASSE), conn=conn)
+    soldes = dl._lire_df("SELECT * FROM soldes_tableau_bord(%s, %s)", (fin, centres), conn=conn)
     soldes_debut = dl._lire_df("SELECT * FROM soldes_tableau_bord(%s, %s)",
-                               (debut - timedelta(days=1), centres))
+                               (debut - timedelta(days=1), centres), conn=conn)
     mensuels = dl._lire_df("SELECT centre, mois, solde::float AS solde FROM soldes_fin_mois(%s, %s, %s)",
-                           (debut, fin, centres))
+                           (debut, fin, centres), conn=conn)
     # Mouvement de la banque passe par chaque centre (versements, retraits).
     banque = dl._lire_df("""
         SELECT e.centre, sum(e.debit - e.credit)::float AS mouvement
         FROM ecritures e JOIN journaux j ON j.compte_contrepartie = e.compte
         WHERE j.type = 'tresorerie' AND j.caisse_physique = 'non'
           AND e.centre = ANY(%s) AND e.date_piece BETWEEN %s AND %s
-        GROUP BY e.centre""", (centres, debut, fin))
-    rubriques = dl._lire_df("SELECT * FROM rubriques_tableau ORDER BY ordre")
-    parametres = dl._lire_df("SELECT * FROM parametres_centre WHERE centre = ANY(%s)", (centres,))
+        GROUP BY e.centre""", (centres, debut, fin), conn=conn)
+    rubriques = dl._lire_df("SELECT * FROM rubriques_tableau ORDER BY ordre", conn=conn)
+    parametres = dl._lire_df("SELECT * FROM parametres_centre WHERE centre = ANY(%s)", (centres,), conn=conn)
     return flux, detail, pieces, soldes, soldes_debut, mensuels, banque, rubriques, parametres
 
 
@@ -496,6 +509,11 @@ def _ops(df):
     return [(r.date_piece, r.piece, r.libelle, r.montant) for r in df.itertuples()]
 
 
+# Aucune piece reelle n'est anterieure a cette date : les premiers brouillards
+# repris datent de novembre 2025 (annee scolaire 2025-2026).
+PREMIERE_DATE_POSSIBLE = date(2025, 1, 1)
+
+
 # Un trou : au moins une semaine de jours ouvres (6 jours, lundi a samedi)
 # sans aucune ecriture. Un jour isole sans mouvement est normal.
 JOURS_TROU = 6
@@ -517,7 +535,7 @@ def _trous(jours):
                        for t in trous]}
 
 
-def _fiabilite(debut, fin, centres, aujourd_hui=None):
+def _fiabilite(debut, fin, centres, aujourd_hui=None, conn=None):
     """Les controles de fiabilite, par centre : nombre et operations."""
     aujourd_hui = aujourd_hui or date.today()
     centres = list(centres)
@@ -525,7 +543,7 @@ def _fiabilite(debut, fin, centres, aujourd_hui=None):
         SELECT centre, count(DISTINCT id_piece) AS total,
                count(DISTINCT id_piece) FILTER (WHERE statut IN ('validee', 'exportee')) AS validees
         FROM ecritures WHERE centre = ANY(%s) AND date_piece BETWEEN %s AND %s
-        GROUP BY centre""", (centres, debut, fin))
+        GROUP BY centre""", (centres, debut, fin), conn=conn)
     # Jours ouvres (lundi a samedi) sans aucune ecriture.
     jours = dl._lire_df("""
         SELECT c AS centre, j::date AS jour
@@ -533,27 +551,34 @@ def _fiabilite(debut, fin, centres, aujourd_hui=None):
              generate_series(%s::date, least(%s::date, %s::date), interval '1 day') j
         WHERE extract(isodow FROM j) < 7
           AND NOT EXISTS (SELECT 1 FROM ecritures e WHERE e.centre = c AND e.date_piece = j::date)
-        ORDER BY 1, 2""", (centres, debut, fin, aujourd_hui))
-    # Dates aberrantes : dans le futur, ou plus d'un an avant l'annee de la
-    # periode (2006 pour 2026, par exemple). Toutes periodes confondues :
+        ORDER BY 1, 2""", (centres, debut, fin, aujourd_hui), conn=conn)
+    # Dates aberrantes : dans le futur, ou avant la mise en service de
+    # l'application (2006 pour 2026, par exemple). Toutes periodes confondues :
     # ce sont justement les pieces qui sortent de toute periode.
+    # Corrige le 08/10/2026 (audit du 07/10, M4) : la borne basse etait
+    # "un an avant l'annee de la periode affichee" ; en 2028, toutes les
+    # pieces de 2026 devenaient des "dates impossibles". La borne est
+    # desormais fixe.
     dates = dl._lire_df("""
         SELECT centre, date_piece, coalesce(nullif(max(num_definitif), ''), id_piece) AS piece,
                min(libelle) AS libelle, sum(debit)::float AS montant
         FROM ecritures
         WHERE centre = ANY(%s)
-          AND (date_piece > %s OR extract(year FROM date_piece) < extract(year FROM %s::date) - 1)
-        GROUP BY centre, date_piece, id_piece ORDER BY date_piece""", (centres, aujourd_hui, fin))
+          AND (date_piece > %s OR date_piece < %s)
+        GROUP BY centre, date_piece, id_piece ORDER BY date_piece""",
+                        (centres, aujourd_hui, PREMIERE_DATE_POSSIBLE), conn=conn)
     lignes = dl._lire_df("""
         SELECT f.centre, f.rubrique, f.date_piece, f.statut,
                coalesce(nullif(n.num, ''), f.id_piece) AS piece, f.libelle,
                f.compte, f.code_tiers, abs(f.montant)::float AS montant, f.sens
-        FROM flux_tableau_bord(%s, %s, %s) f
+        FROM {source} f
         LEFT JOIN LATERAL (SELECT max(num_definitif) AS num FROM ecritures x
                            WHERE x.id_piece = f.id_piece) n ON true
         WHERE f.rubrique IN (%s, %s, %s, %s) OR f.statut IN %s
-        ORDER BY f.date_piece""",
-                         (debut, fin, centres, ATTENTE, NON_CLASSE, COURS, CAMP, STATUTS_NON_VALIDES))
+        ORDER BY f.date_piece""".format(
+                             source="tmp_flux_tb" if conn is not None else "flux_tableau_bord(%s, %s, %s)"),
+                         ((() if conn is not None else (debut, fin, centres))
+                          + (ATTENTE, NON_CLASSE, COURS, CAMP, STATUTS_NON_VALIDES)), conn=conn)
     out = {}
     for c in centres:
         p = pieces[pieces["centre"] == c]
@@ -676,7 +701,11 @@ def calculer(debut, fin, centres, aujourd_hui=None):
     deja autorises (le controle d'acces est fait par l'appelant)."""
     centres = list(centres)
     mois = mois_de(debut, fin)
-    flux, detail, pieces, soldes, soldes_debut, mensuels, banque, rubriques, parametres = _lire(debut, fin, centres)
+    with dl._connexion() as conn:
+        _flux_temporaire(conn, debut, fin, centres)
+        flux, detail, pieces, soldes, soldes_debut, mensuels, banque, rubriques, parametres = \
+            _lire(debut, fin, centres, conn)
+        fiab = _fiabilite(debut, fin, centres, aujourd_hui, conn=conn)
     params = _parametres(parametres, centres)
     detail = _preparer_detail(detail)
     tous = _flux_complets(flux, detail)
@@ -690,7 +719,6 @@ def calculer(debut, fin, centres, aujourd_hui=None):
 
     caisses = soldes[soldes["physique"]]
     attente = tous[(tous["rubrique"] == ATTENTE) & (tous["sens"] == "entree")]
-    fiab = _fiabilite(debut, fin, centres, aujourd_hui)
     fiches, alertes = {}, []
     for c in centres:
         fiche = _fiche(c, tous, detail, lignes, mois, fin, params, soldes, soldes_debut, mensuels, banque)

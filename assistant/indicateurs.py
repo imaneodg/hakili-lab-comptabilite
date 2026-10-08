@@ -79,6 +79,31 @@ INDICATEURS = {
     "nb_pieces": {
         "libelle": "Nombre d'opérations", "unite": "", "source": "flux",
         "definition": "Pieces comptables qui portent un encaissement ou un decaissement."},
+    # Indicateurs du TABLEAU DE BORD (08/10/2026, audit du 07/10, M6) : memes
+    # chiffres que l'onglet Tableau de bord, calcules par la meme fonction SQL
+    # (flux_tableau_bord) avec le meme classement (classement_comptes,
+    # rubriques_tableau). Ce sont eux qui repondent a "benefice", "resultat",
+    # "marge" et "charges" : le directeur lit ces chiffres-la dans l'onglet.
+    "encaissements_exploitation": {
+        "libelle": "Argent reçu de l'activité", "unite": "F", "source": "tableau",
+        "definition": "Comme au tableau de bord : argent recu des cours d'appui, du camp, des frais "
+                      "de document et des contributions recues, a la date du paiement."},
+    "charges_exploitation": {
+        "libelle": "Charges payées", "unite": "F", "source": "tableau",
+        "definition": "Comme au tableau de bord : vacations et salaires, contribution au SIAO, loyer, "
+                      "eau, electricite, internet, fournitures et autres charges courantes payees "
+                      "sur la periode (base caisse)."},
+    "resultat_tableau": {
+        "libelle": "Résultat (tableau de bord)", "unite": "F", "source": "derive",
+        "definition": "Argent recu de l'activite moins charges payees : le Resultat affiche dans "
+                      "l'onglet Tableau de bord."},
+    "marge_tableau_pct": {
+        "libelle": "Marge (tableau de bord)", "unite": "%", "source": "derive",
+        "definition": "Resultat (tableau de bord) / argent recu de l'activite x 100."},
+    "hors_exploitation": {
+        "libelle": "Sorties hors exploitation", "unite": "F", "source": "tableau",
+        "definition": "Comme au tableau de bord : impots, emprunts, prets entre centres, dossiers de "
+                      "conseil, equipement, avances au personnel (net des entrees de meme nature)."},
     "en_attente_471": {
         "libelle": "Opérations à classer", "unite": "F", "source": "attente",
         "definition": "Solde du compte d'attente sur la periode : argent bien recu ou sorti dont "
@@ -93,27 +118,34 @@ _SYNONYMES = {
     "argent depense": "decaissements", "depense ce mois": "decaissements", "paye": "decaissements",
     "sorties d argent": "decaissements", "reste": "flux_net", "difference": "flux_net",
     "ce qu il reste": "flux_net", "rapporte": "produits", "ce que ca a rapporte": "produits",
-    "cout": "charges", "ce que ca a coute": "charges", "vacations": "masse_salariale",
+    "cout": "charges_exploitation", "ce que ca a coute": "charges_exploitation", "vacations": "masse_salariale",
     "salaires et vacations": "masse_salariale", "depenses fixes": "charges_fixes",
     "a classer": "en_attente_471", "operations": "nb_pieces", "nombre d operations": "nb_pieces",
     "depenses": "decaissements", "depense": "decaissements", "sorties": "decaissements",
     "decaissement": "decaissements", "decaisse": "decaissements",
-    "resultat net": "resultat", "benefice": "resultat", "perte": "resultat",
-    "resultat de gestion": "resultat", "gain": "resultat", "rentabilite": "marge_resultat_pct",
+    "resultat net": "resultat_tableau", "benefice": "resultat_tableau", "perte": "resultat_tableau",
+    "resultat de gestion": "resultat", "gain": "resultat_tableau", "rentabilite": "marge_tableau_pct",
     "produit": "produits", "chiffre d affaires": "produits", "ca": "produits",
     "flux net": "flux_net", "solde net": "flux_net", "excedent de tresorerie": "flux_net",
     "flux": "flux_net", "tresorerie nette": "flux_net",
     "scolarite": "frais_scolarite", "frais de scolarite": "frais_scolarite",
     "mensualites": "frais_scolarite", "paiements eleves": "frais_scolarite",
-    "charge": "charges", "couts": "charges",
+    "charge": "charges_exploitation", "couts": "charges_exploitation",
     "salaires": "masse_salariale", "masse salariale": "masse_salariale", "personnel": "masse_salariale",
-    "marge": "marge_resultat_pct", "taux de marge": "marge_resultat_pct",
+    "marge": "marge_tableau_pct", "taux de marge": "marge_tableau_pct",
     "marge de tresorerie": "marge_pct",
     "effectif": "eleves_payants", "eleves": "eleves_payants", "nombre d eleves": "eleves_payants",
     "recette par eleve": "encaissement_par_eleve", "part": "part_pct", "contribution": "part_pct",
     "pieces": "nb_pieces", "nombre de pieces": "nb_pieces",
     "471": "en_attente_471", "compte d attente": "en_attente_471", "a reclasser": "en_attente_471",
     "attente": "en_attente_471",
+    "resultat du tableau de bord": "resultat_tableau",
+    "charges payees": "charges_exploitation", "charges d exploitation": "charges_exploitation",
+    "depenses d exploitation": "charges_exploitation", "charges du tableau de bord": "charges_exploitation",
+    "sorties hors exploitation": "hors_exploitation", "hors exploitation": "hors_exploitation",
+    "argent recu de l activite": "encaissements_exploitation",
+    "resultat rattache": "resultat", "resultat au mois de prestation": "resultat",
+    "charges rattachees": "charges", "marge de gestion": "marge_resultat_pct",
 }
 
 # Ce dont chaque indicateur derive a besoin pour etre calcule.
@@ -126,6 +158,8 @@ DEPENDANCES = {
     "part_charges_fixes_pct": ["charges_fixes", "charges"],
     "encaissement_par_eleve": ["frais_scolarite", "eleves_payants"],
     "part_pct": [],
+    "resultat_tableau": ["encaissements_exploitation", "charges_exploitation"],
+    "marge_tableau_pct": ["encaissements_exploitation", "charges_exploitation"],
 }
 
 DIMENSIONS = {

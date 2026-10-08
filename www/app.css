@@ -512,6 +512,14 @@ h1, h2, h3, h4, h5 { font-family:inherit; color:var(--hk-texte); }
 .ruban.info { background:var(--hk-primaire-clair); color:var(--hk-primaire-fonce);
   border-left-color:var(--hk-primaire); }
 .ruban.info a { color:var(--hk-primaire-fonce); font-weight:600; }
+/* Avertissement (08/10/2026, Export Sage) : pieces deja exportees dans la
+   periode choisie. Orange de la charte (--hk-alerte), entre .att et .ko. */
+.ruban.alerte { background:var(--hk-alerte-clair); color:var(--hk-alerte);
+  border-left-color:var(--hk-alerte); }
+.ruban .confirmation-export { margin:10px 0 0; }
+.ruban .confirmation-export .shiny-input-container,
+.ruban .confirmation-export .form-group { margin-bottom:0; }
+.ruban .confirmation-export label { font-weight:600; color:var(--hk-erreur); }
 
 /* Lien "+ Ajouter un mois" (refonte visuelle - etape 4, Saisie) :
    variante de .lien-etendre reservee a m_rep_ajouter (garde son
@@ -859,3 +867,15 @@ shiny-chat-container {
 .choix-segment .shiny-options-group label:has(input:focus-visible) { outline:2px solid var(--hk-primaire);
   outline-offset:1px; }
 .choix-segment .shiny-input-container { display:flex; flex-direction:column; align-items:flex-start; }
+
+/* Sections repliables du Referentiel (08/10/2026) : code d'acces, cloture
+   des mois. Meme lecture que les "Afficher" du tableau de bord. */
+.hk-deplier { margin-top: 14px; border-top: 1px solid var(--hk-bordure-douce); padding-top: 12px; }
+.hk-deplier > summary { list-style: none; display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; font-weight: 600; font-size: 14px; color: var(--hk-primaire); }
+.hk-deplier > summary::-webkit-details-marker { display: none; }
+.hk-deplier > summary::after { content: "\25BE"; font-size: 11px; }
+.hk-deplier[open] > summary::after { content: "\25B4"; }
+.hk-deplier > summary:focus-visible { outline: 2px solid var(--hk-primaire); outline-offset: 2px; }
+.hk-deplier[open] > summary { margin-bottom: 10px; }
+.hk-deplier .form-group, .hk-deplier .shiny-input-container { max-width: 340px; }

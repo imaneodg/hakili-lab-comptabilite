@@ -256,7 +256,9 @@ def test_masse_salariale_et_part(ctx):
 
 
 def test_produits_et_resultat_de_gestion(ctx):
-    _, p = moteur.analyser(ctx, indicateurs="benefice, chiffre d'affaires, charges",
+    # "benefice" designe depuis le 08/10/2026 le resultat du tableau de bord ;
+    # le resultat rattache au mois de prestation garde son nom de code.
+    _, p = moteur.analyser(ctx, indicateurs="resultat, chiffre d'affaires, charges",
                            periode="T1 2026", centres="SAA", regrouper_par="mois")
     par_mois = {l["mois"]: l for l in p["lignes"]}
     assert par_mois["février 2026"]["produits"] == 200000

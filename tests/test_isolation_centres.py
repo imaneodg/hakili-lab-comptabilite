@@ -146,7 +146,7 @@ FONCTIONS_A_PERIMETRE_CENTRE = [
     # (nom de la fonction dans app.py, ce qu'elle expose)
     "pieces_vue",      # Brouillard
     "attente",         # Validation
-    "a_exporter",      # Export Sage
+    "pieces_periode",  # Export Sage (a_exporter en derive)
     "anomalies_vue",   # Controles
     "b_stats",         # bandeau de soldes (Brouillard)
     "m_ruban",         # ruban de confirmation (Saisie)
@@ -179,7 +179,7 @@ def test_onglets_valides_et_exportables_sont_bornes_au_centre_hors_comptable():
     # sur une variable jamais utilisee) passe a tort.
     source = APP_PY.read_text(encoding="utf-8")
     arbre = ast.parse(source)
-    for nom in ("attente", "a_exporter", "pieces_vue"):
+    for nom in ("attente", "pieces_periode", "pieces_vue"):
         corps = _corps_source(nom, source, arbre)
         idx_garde = corps.find("if not est_comptable():")
         assert idx_garde != -1, f"{nom}() n'a plus de branche 'if not est_comptable():'"
