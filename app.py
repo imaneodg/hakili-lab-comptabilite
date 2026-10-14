@@ -275,6 +275,16 @@ def server(input, output, session):
     # dependants que si la valeur change vraiment.
     rev_ecritures = reactive.value(None)
     rev_referentiel = reactive.value(None)
+    # Compteur local (14/10/2026) : distinct de rev_referentiel, qui vient du
+    # sondage disque (2 s) et reste isole dans m_champs() pour ne pas effacer
+    # une saisie en cours (correctif du 10/09). Celui-ci ne bouge QUE quand
+    # CETTE session vient de creer un tiers ou un compte (_ajouter_tiers,
+    # _ajouter_compte) : y etre reactif, sans redevenir reactif a ref() en
+    # general, redonne aux listes deroulantes du formulaire de saisie leur
+    # mise a jour immediate apres un ajout, sans reintroduire le bug que le
+    # correctif du 10/09 avait resolu (le formulaire qui se reconstruisait a
+    # chaque ecriture enregistree ailleurs).
+    maj_referentiel_local = reactive.value(0)
 
     @reactive.effect
     def _repartir_revisions():
@@ -1047,11 +1057,13 @@ def server(input, output, session):
                 champs = []
                 for _, c in centres_actifs.iterrows():
                     code = c["code_centre"]
-                    val = 0.0
+                    val = 0
                     if sc is not None and len(sc):
                         v = sc.loc[(sc["journal"] == j) & (sc["centre"] == code), "solde_ouverture"]
                         if len(v):
-                            val = float(v.iloc[0])
+                            # Entier, pas float (14/10/2026) : meme raison que
+                            # les montants de la Saisie, voir plus haut.
+                            val = int(v.iloc[0])
                     champs.append(ui.input_numeric(_id_solde_centre(code, j), c["intitule"],
                                                      value=val, min=0, step=1000))
                 blocs.append(ui.div(
@@ -1064,7 +1076,9 @@ def server(input, output, session):
                 # Compte partage entre tous les centres (la banque) : un seul
                 # champ, comme avant.
                 brut = jx.loc[jx["journal"] == j, "solde_ouverture"]
-                val = float(brut.iloc[0]) if len(brut) and pd.notna(brut.iloc[0]) else 0.0
+                # Entier, pas float (14/10/2026) : meme raison que les
+                # montants de la Saisie et les soldes par centre ci-dessus.
+                val = int(brut.iloc[0]) if len(brut) and pd.notna(brut.iloc[0]) else 0
                 blocs.append(ui.input_numeric(_id_journal(j), f"{j} - {intitule_j}",
                                                value=val, min=0, step=1000))
         return ui.div({"class": "popover-form panneau-flottant"}, *blocs,
@@ -1542,7 +1556,9 @@ def server(input, output, session):
             # lorsqu'on quitte le champ (tabulation ou clic ailleurs) : aucune
             # perte fonctionnelle, juste un apercu qui se met a jour une fois
             # le montant termine plutot qu'a chaque caractere.
-            ui.tags.td(ui.input_numeric(f"m_rep_montant_{rid}", None, value=float(montant_val or 0),
+            # Entier, pas float (14/10/2026, meme raison que le champ "montant"
+            # generique de m_champs() plus haut) : evite l'affichage "0,0".
+            ui.tags.td(ui.input_numeric(f"m_rep_montant_{rid}", None, value=int(montant_val or 0),
                                          min=0, step=500, update_on="blur")),
             suppr,
         )
@@ -1786,6 +1802,11 @@ def server(input, output, session):
         # reste gere normalement a l'enregistrement (resoudre_tiers,
         # cf. create=True plus bas) ; seule la fraicheur immediate de la
         # liste proposee change, pas la possibilite de saisir.
+        # 14/10/2026 : reactif a maj_referentiel_local (nos propres ajouts de
+        # tiers/compte seulement, voir plus bas) - ref() est deja garanti
+        # frais a ce moment precis, puisque le meme geste qui incremente
+        # maj_referentiel_local force aussi rev_referentiel a changer.
+        maj_referentiel_local()
         with reactive.isolate():
             r = ref()
         # "Ecriture libre" a deux jeux de champs possibles ; les autres
@@ -1881,7 +1902,11 @@ def server(input, output, session):
                 # update_on="blur" : meme raison que m_rep_montant_* plus bas
                 # (repartition) - sans ca, chaque chiffre tape ici reconstruit
                 # tout l'apercu "Ecriture generee".
-                widgets.append(ui.input_numeric(id_, ch["l"], value=float(valeur), min=0, step=500,
+                # Entier, pas float (14/10/2026) : le franc CFA n'a pas de
+                # sous-unite, et une valeur comme 0.0 s'affichait "0,0" dans
+                # un navigateur en francais (virgule = separateur decimal),
+                # trompeur pour la caissiere. U3 de l'audit du 07/10/2026.
+                widgets.append(ui.input_numeric(id_, ch["l"], value=int(valeur), min=0, step=500,
                                                  update_on="blur"))
             elif t == "oui_non":
                 widgets.append(ui.input_select(id_, ch["l"], choices={"oui": "Oui", "non": "Non"},
@@ -2023,11 +2048,22 @@ def server(input, output, session):
         lignes_html = []
         for _, x in L.iterrows():
             cls = "tresorerie" if x["compte"] in tr else ""
+            # Corrige le 13/10/2026 : l'apercu affichait le texte brut tape
+            # dans la case Tiers (ex. "papao", ou pire "papao(411papao)" si
+            # la caissiere colle un libelle deja forme), jamais le code
+            # genere. dl.code_tiers_candidat() sait deja faire ce calcul
+            # (utilise plus bas pour la suggestion de mois) : on l'applique
+            # ici aussi, uniquement pour l'affichage - le code reellement
+            # enregistre reste fige par resoudre_tiers() au moment de
+            # "Enregistrer la piece", comme avant.
+            tiers_aff = x["code_tiers"]
+            if tiers_aff:
+                tiers_aff = dl.code_tiers_candidat(tiers_aff, str(x["compte"])[:3], r) or tiers_aff
             lignes_html.append(
                 f"<tr class='{cls}'>"
                 f"<td class='num'>{x['compte']}<br><span style='font-size:10px;color:var(--hk-texte-doux)'>"
                 f"{dl.intitule_compte(r, x['compte'])}</span></td>"
-                f"<td class='num' style='font-size:11px'>{x['code_tiers']}</td>"
+                f"<td class='num' style='font-size:11px'>{tiers_aff}</td>"
                 f"<td>{x['libelle']}</td>"
                 f"<td class='m'>{dl.fcfa(x['debit']) if float(x['debit']) > 0 else ''}</td>"
                 f"<td class='m'>{dl.fcfa(x['credit']) if float(x['credit']) > 0 else ''}</td></tr>"
@@ -2236,6 +2272,12 @@ def server(input, output, session):
         ui.update_text_area("m_note", value="")
         reinitialiser()
         rafraichir()
+        # 14/10/2026 : un tiers/compte neuf a pu etre cree a l'instant par
+        # resoudre_tiers() ci-dessus (nom tape librement, absent du
+        # referentiel) - meme raison de rafraichir la liste du formulaire que
+        # pour un ajout depuis le panneau Referentiel.
+        rev_referentiel.set((rev_referentiel() or 0) + 1)
+        maj_referentiel_local.set(maj_referentiel_local() + 1)
 
     @render.ui
     def m_dernier():
@@ -3372,6 +3414,10 @@ def server(input, output, session):
             ui.notification_show(f"Tiers {code} créé", type="message")
             panneau_ouvert.set(None)
             rafraichir()
+            # Force ref() a se relire tout de suite (sans attendre le sondage
+            # disque, 2 s) ET fait rejouer m_champs() pour ce seul ajout.
+            rev_referentiel.set((rev_referentiel() or 0) + 1)
+            maj_referentiel_local.set(maj_referentiel_local() + 1)
         finally:
             ui.update_action_button("r_ajouter", disabled=False)
 
@@ -3401,6 +3447,8 @@ def server(input, output, session):
             ui.notification_show("Compte créé", type="message")
             panneau_ouvert.set(None)
             rafraichir()
+            rev_referentiel.set((rev_referentiel() or 0) + 1)
+            maj_referentiel_local.set(maj_referentiel_local() + 1)
         finally:
             ui.update_action_button("r_ajouter_compte", disabled=False)
 
