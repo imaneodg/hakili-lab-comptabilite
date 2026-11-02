@@ -19,7 +19,6 @@ Dans pgAdmin (ou `psql`), créez trois bases **vides, encodage UTF8** :
 |---|---|
 | `hakilisso` (ou le nom de votre choix) | votre base de travail |
 | `hakili_test` | effacée et recréée par `verifier.py` à chaque lancement |
-| `hakili_verif` | base de vérification de `verifier_donnees.py` (facultative) |
 
 Sous Windows, forcez **Encoding: UTF8** à la création : la valeur proposée par défaut (WIN1252) provoque des erreurs d'encodage.
 
@@ -85,7 +84,6 @@ Pour un seul fichier : `python -m pytest tests/test_modeles.py -v` (attention, i
 | `test_tableau_bord.py`, `test_camp_cibles_forces.py` | calculs du tableau de bord |
 | `test_correctifs_audit_2026_10_08.py` | export Sage (marquage, libellés), clôtures, protection, dates, codes, 17 caractères… |
 | `test_utils.py` | petites fonctions |
-| `test_ocr_client.py` | vide (OCR abandonné) |
 
 Règle de travail : **tout correctif vient avec un test** qui échoue avant et passe après. C'est ce qui a permis de modifier un code de cette taille sans régression.
 

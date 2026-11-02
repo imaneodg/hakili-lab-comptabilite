@@ -110,7 +110,7 @@ Une migration ne se défait pas toute seule. Si elle a abîmé des données (ça
 
 ## 11.5 Les sauvegardes
 
-**État au 08/10/2026 : aucune sauvegarde automatique ne tourne en production.** L'ancien script (`cron_sauvegarde_host.sh`) exige `pg_dump` sur l'hôte, qui n'y est pas. Le nouveau script `backup/sauvegarde.sh` passe par le conteneur et ne demande aucun droit administrateur. Il est écrit et testé, mais pas encore déployé ni planifié. **C'est la première chose à faire.**
+**État au 08/10/2026 : aucune sauvegarde automatique ne tourne en production.** L'ancien script (`cron_sauvegarde_host.sh`, supprimé du dépôt le 02/11/2026) exigeait `pg_dump` sur l'hôte, qui n'y est pas. Le nouveau script `backup/sauvegarde.sh` passe par le conteneur et ne demande aucun droit administrateur. Il est écrit et testé, mais pas encore déployé ni planifié. **C'est la première chose à faire.**
 
 Une fois le code déployé :
 
@@ -193,7 +193,7 @@ Afiya avait demandé qu'on lui rappelle ces trois points (certificat, nginx, mis
 
 - `docker compose down -v` (le `-v` supprime les volumes ; le volume externe protège en principe, mais ne tentez pas le diable) ;
 - supprimer le volume `hakili_gestion_caisse_pgdata` ;
-- jouer `schema.sql`, `seed.sql`, `production_reset.sql`, `purge_avant_mise_en_service.sql`, `nettoyer_operations.py` ou `import_historique.py` sur `Hakili_compta` ;
+- jouer `schema.sql`, `seed.sql`, `production_reset.sql`, `purge_avant_mise_en_service.sql` ou `import_historique.py` sur `Hakili_compta` ;
 - modifier une migration déjà jouée ;
 - publier PostgreSQL sur `0.0.0.0` ou l'application hors de `127.0.0.1` ;
 - utiliser le port 8000 ;

@@ -87,7 +87,7 @@ Après le déploiement :
 
 ### Ménage
 
-14. Supprimer les fichiers vides (`demo_manuel.py`, `mock_ocr_server.py`, `services/ocr_client.py`, `tests/test_ocr_client.py`), `nettoyer_operations.py`, `backup/donnees_avant_correctifs_sage_2026-09-23.py`, `backup/pg_backup.py` et `backup/cron_sauvegarde_host.sh` une fois `sauvegarde.sh` en place.
+14. ~~Supprimer les fichiers vides et obsolètes~~ : **fait le 02/11/2026** (`demo_manuel.py`, `mock_ocr_server.py`, `services/`, `tests/test_ocr_client.py`, `nettoyer_operations.py`, `verifier_donnees.py`, `backup/donnees_avant_correctifs_sage_2026-09-23.py`, `backup/cron_sauvegarde_host.sh`). `backup/pg_backup.py` est conservé pour un usage local uniquement.
 15. Ajouter un `.gitattributes` (`* text=auto eol=lf`).
 16. Remplacer le `README.md` par un court texte qui renvoie à `docs/`.
 17. Découper `app.py` (~3 750 lignes) en modules par onglet (saisie, brouillard, validation, export, contrôles, référentiel), comme l'a été le tableau de bord. À faire avec les tests de réactivité et d'autorisation comme filet.

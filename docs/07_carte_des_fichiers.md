@@ -21,9 +21,6 @@ Légende : **Git** = versionné ; **local** = ignoré par Git, ne quitte pas le 
 | `README.md` | Git | Ancienne présentation. **En partie périmée** (parle du port 8000 et d'un compose sans base). Ce dossier `docs/` la remplace. |
 | `import_historique.py` | Git | Importe les brouillards Excel 2026 dans une base. Servait à construire la base de démonstration locale. **Pas pour la production** (décision du 16/09/2026). |
 | `verifier.py` | Git | Recrée une base de test jetable `hakili_test` depuis `schema.sql` + `seed.sql`, puis lance toute la suite pytest. Ne touche jamais `Hakili_compta`. |
-| `verifier_donnees.py` | Git | Importe les brouillards dans une base `hakili_verif` et contrôle la chaîne d'analyse et les graphiques. |
-| `nettoyer_operations.py` | Git | Vieux script qui vide les écritures d'une base. **Dangereux**, à supprimer ou à ne jamais lancer. |
-| `demo_manuel.py`, `mock_ocr_server.py` | Git | **Vides** : restes d'un essai d'intégration OCR abandonné. À supprimer. |
 | `logo_Hakili_Lab.jpeg` | Git | Logo d'origine. |
 | `HAKILI_LAB_postgres_2.code-workspace` | local | Espace de travail VS Code d'Afiya. |
 | `hakili.log` | local | Journal de l'application en local. |
@@ -82,23 +79,21 @@ Voir chapitre 6 : `schema.sql`, `seed.sql`, `migrations/`, `diagnostic_productio
 |---|---|---|
 | `sauvegarde.sh` | à commiter | **La sauvegarde à utiliser** : `pg_dump` via `docker compose exec db`, contrôle du fichier, conservation 30 jours, copie rclone optionnelle. À mettre dans le crontab du compte `imane`. |
 | `restauration_essai.sh` | à commiter | Restaure le dernier dump dans une base temporaire, compare les comptes, supprime la base temporaire. |
-| `pg_backup.py`, `cron_sauvegarde_host.sh` | Git | Ancienne méthode, **inutilisable** sur ce serveur (exige `pg_dump` sur l'hôte et sudo). Gardés pour mémoire, à supprimer à terme. |
-| `donnees_avant_correctifs_sage_2026-09-23.py` | Git | Copie de code versionnée par erreur. À supprimer. |
+| `pg_backup.py` | Git | **Usage local uniquement** : sauvegarde d'une base de développement sur un poste où `pg_dump` est installé. Ne sert pas au serveur (utiliser `sauvegarde.sh`). |
 | `app_avant_*.py`, `avant_*/`, `ancien_tableau_bord_*/` | local | Copies de sécurité faites avant de grosses modifications. Inutiles maintenant que tout est dans Git. |
 | `sauvegardes/` | local | Dumps de base. Jamais dans Git. |
 
-## 7.7 `mcp_server/`, `services/`, `nginx/`, `www/`, `tests/`
+## 7.7 `mcp_server/`, `nginx/`, `www/`, `tests/`
 
 | Chemin | Rôle |
 |---|---|
 | `mcp_server/server.py` | Façade MCP facultative sur les outils de l'assistant (non utilisée par l'application). |
-| `services/ocr_client.py`, `services/__init__.py` | **Vides.** Projet d'OCR des factures abandonné (voir chapitre 13). |
 | `nginx/hakili.conf` | Modèle de reverse proxy HTTPS. **Pas utilisé** : le nginx de production est celui de l'hôte, géré par l'administrateur. Utile comme base à lui transmettre. |
 | `www/app.css` | Toute la charte : variables `--hk-*`, barre latérale marine, cartes blanches, boutons. |
 | `www/tableau_bord.css` | Styles du tableau de bord. |
 | `www/fonts/`, `www/bootstrap-icons/` | Polices (Inter, Public Sans) et icônes, servies localement pour fonctionner sans Internet. |
 | `www/*.png`, `favicon.ico` | Logos et icônes. |
-| `tests/` | ~300 tests pytest (voir chapitre 12). `test_ocr_client.py` est vide. |
+| `tests/` | ~300 tests pytest (voir chapitre 12). |
 
 ## 7.8 `Claude outputs/` — à manipuler avec précaution
 

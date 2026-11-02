@@ -632,7 +632,7 @@ Ce dossier est volontairement exclu de Git afin de ne pas envoyer les sauvegarde
 
 
 
-Pour une exécution automatique et régulière (recommandée en production), planifier `backup/cron\_sauvegarde\_host.sh` dans le cron de la machine hôte plutôt que d'appeler `pg\_backup.py` directement : ce script vérifie d'abord que `pg\_dump` et `python3` sont bien présents sur l'hôte, et journalise clairement tout échec au lieu de le laisser disparaître silencieusement. Voir les commentaires en tête de ce script pour la ligne de crontab à ajouter.
+`pg\_backup.py` est réservé à un usage local (poste de développement où `pg\_dump` est installé). En production, la sauvegarde se fait avec `backup/sauvegarde.sh`, lancé sur le serveur : il exécute `pg\_dump` dans le conteneur `db` (`docker compose exec db`), contrôle le fichier produit et conserve 30 jours de sauvegardes. Voir `docs/07\_carte\_des\_fichiers.md` et `docs/11\_serveur\_et\_deploiement.md`.
 
 
 
