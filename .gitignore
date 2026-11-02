@@ -77,3 +77,7 @@ backup/avant_tableau_bord*/
 backup/avant_regles_rouge_*/
 backup/ancien_tableau_bord_*/
 backup/avant_motif_transfert_*/
+
+# Environnement Python local et cache de pytest
+.venv_nouveau/
+.pytest_cache/

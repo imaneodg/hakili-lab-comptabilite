@@ -67,9 +67,9 @@ services:
     # l'audit du 18/09) : ce montage laissait croire que les sauvegardes
     # s'executaient depuis ce conteneur, alors que rien ne les y declenchait
     # (aucun cron dans l'image) et que pg_dump n'y est de toute facon pas
-    # installe (voir Dockerfile). Les sauvegardes tournent desormais sur
-    # l'HOTE, via backup/cron_sauvegarde_host.sh, contre le port 5432 deja
-    # publie ci-dessous par le service db - voir ce script pour le detail.
+    # installe (voir Dockerfile). Les sauvegardes passent desormais par
+    # backup/sauvegarde.sh, lance sur l'hote : il execute pg_dump DANS le
+    # conteneur db (docker compose exec db), sans rien installer sur l'hote.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8022')"]
       interval: 30s
