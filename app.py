@@ -601,6 +601,9 @@ def server(input, output, session):
                     ui.input_action_button("b_supprimer", "Supprimer",
                                             icon=ui.tags.i({"class": "bi bi-trash"}),
                                             class_="hk-btn-danger"),
+                    # === DEBUT export releve Excel (31/10/2026) =============
+                    _bloc_export_releve(r),
+                    # === FIN export releve Excel ============================
                     ui.span({"class": "aide"}, "Sélectionnez une ligne dans le tableau ci-dessous."),
                 ),
                 ui.output_data_frame("b_table"),
@@ -2627,6 +2630,130 @@ def server(input, output, session):
             ui.notification_show(
                 "Piece anterieure a la sauvegarde des valeurs de saisie : modele, journal et date "
                 "sont repris, mais les champs du formulaire sont a ressaisir.", type="warning")
+
+    # ======================= DEBUT export releve Excel =======================
+    #
+    # Ajoute le 31/10/2026 a la demande du comptable : l'application
+    # n'affichait qu'un solde global unique par journal/centre, recalcule sur
+    # tout l'historique, impossible a comparer au brouillard papier. Ce bloc
+    # lui donne le detail ligne par ligne avec solde cumule (DATE / PIECE /
+    # LIBELLE / STATUT / DEBIT / CREDIT / SOLDE), pour qu'il localise
+    # lui-meme ou un ecart commence - un solde d'ouverture mal saisi ou une
+    # ecriture manquante/en double, les deux seules causes possibles
+    # (mecanisme-calcul-soldes-brouillard-vs-app-2026-10-26).
+    #
+    # Bloc volontairement autonome et reversible :
+    #   - tout le calcul et la generation du fichier sont dans
+    #     logic/export_releve.py, importe ici et nulle part ailleurs ;
+    #   - aucune fonction existante n'est modifiee (solde_caisse(),
+    #     mouvements_tresorerie(), controler_soldes() sont seulement lues) ;
+    #   - les filtres Journal et Periode deja a l'ecran sont relus, jamais
+    #     modifies ; le filtre Statut est volontairement IGNORE (un relevé de
+    #     caisse porte toujours sur toutes les pieces : une piece "saisie"
+    #     correspond deja a de l'argent qui a physiquement bouge) ;
+    #   - aucune nouvelle table, colonne, ni etat reactif partage.
+    # Retirer la fonctionnalite = supprimer ce bloc, logic/export_releve.py et
+    # tests/test_export_releve.py.
+    import logic.export_releve as er
+
+    def _bloc_export_releve(r):
+        """Bouton d'export et, pour le comptable seul, le selecteur de centre.
+
+        Pas de selecteur pour un role local : il n'exporte que son propre
+        centre, comme partout ailleurs dans le Brouillard. Pas de selecteur
+        pour la banque non plus (compte partage, un solde unique) : d'ou le
+        panel_conditional sur les seuls journaux de caisse physique."""
+        elements = [ui.download_button(
+            "er_fichier", "Exporter le relevé (Excel)",
+            icon=ui.tags.i({"class": "bi bi-file-earmark-spreadsheet"}),
+            class_="hk-btn-secondaire")]
+        if est_comptable():
+            jx = r["journaux"]
+            physiques = (list(jx.loc[jx["caisse_physique"] == "oui", "journal"])
+                         if "caisse_physique" in jx.columns else [])
+            condition = " || ".join(f"input.b_journal === '{j}'" for j in physiques) or "false"
+            elements.append(ui.panel_conditional(
+                condition,
+                ui.input_select("er_centre", None, choices=dl.centres_reels(r), width="170px")))
+        elements.append(ui.output_ui("er_message"))
+        # Style porte par le bloc lui-meme plutot que par www/style.css :
+        # la feuille de style commune n'a pas a garder de regle orpheline le
+        # jour ou cette fonctionnalite sera retiree.
+        return ui.span(
+            {"class": "er-bloc"},
+            ui.tags.style(
+                ".er-bloc{display:inline-flex;align-items:center;gap:.5rem;}"
+                ".er-bloc .shiny-input-container,.er-bloc .form-group{margin-bottom:0;}"
+                ".er-bloc .shiny-input-container>label{display:none;}"),
+            *elements)
+
+    @reactive.calc
+    def _er_contexte():
+        """(contexte, message) : ce qu'il faut pour generer le relevé, ou un
+        message precis expliquant ce qui manque encore a l'ecran."""
+        u = util()
+        if u is None:
+            return None, "Connexion requise."
+        r = ref()
+        journal = input.b_journal()
+        if not journal or journal == "Tous":
+            return None, "Choisissez un journal précis (pas « Tous ») pour exporter le relevé."
+        periode = input.b_periode()
+        if not periode or not periode[0] or not periode[1]:
+            return None, "Choisissez une période."
+        debut, fin = pd.Timestamp(periode[0]).date(), pd.Timestamp(periode[1]).date()
+        if debut > fin:
+            return None, "Période à l'envers : la date de début est après la date de fin."
+        physique = dl.est_caisse_physique(r, journal)
+        if est_comptable():
+            # Caisse physique : un centre precis, jamais un total consolide -
+            # un relevé qui melange cinq tiroirs-caisses ne se compare a aucun
+            # brouillard papier. Banque : compte partage, un seul solde.
+            centre = get_input("er_centre", "") if physique else None
+            if physique and centre not in dl.centres_reels(r):
+                return None, "Choisissez le centre à exporter."
+        else:
+            # Meme regle que "Soldes d'ouverture" du Referentiel : un role
+            # local n'exporte que son propre centre, et le solde de la banque
+            # (compte partage) ne lui est jamais montre.
+            if not physique:
+                return None, "Le relevé de la banque est réservé au comptable."
+            centre = u["centre"]
+        return {"journal": journal, "centre": centre, "debut": debut, "fin": fin,
+                "nom_centre": dl.nom_centre(r, centre) if centre else ""}, ""
+
+    @render.ui
+    def er_message():
+        _, message = _er_contexte()
+        return ui.span({"class": "aide"}, message) if message else None
+
+    def _er_nom_fichier():
+        ctx, _ = _er_contexte()
+        if ctx is None:
+            return "releve.xlsx"
+        suffixe = f"_{ctx['centre']}" if ctx["centre"] else ""
+        return (f"releve_{ctx['journal']}{suffixe}_"
+                f"{ctx['debut']:%Y%m%d}_{ctx['fin']:%Y%m%d}.xlsx")
+
+    @render.download_button(
+        filename=lambda: _er_nom_fichier(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    def er_fichier():
+        ctx, message = _er_contexte()
+        if ctx is None:
+            # Meme principe que e_xlsx : on ne bloque pas le telechargement,
+            # le fichier explique ce qui manque (message aussi affiche a
+            # l'ecran par er_message()), sans aucun chiffre qui pourrait etre
+            # pris pour un solde.
+            yield er.construire_fichier_message(message or "Relevé indisponible.")
+            return
+        logger.info("Export relevé Excel : journal %s, centre %s, du %s au %s, par %s.",
+                    ctx["journal"], ctx["centre"] or "-", ctx["debut"], ctx["fin"],
+                    (util() or {}).get("identifiant"))
+        yield er.exporter(ctx["journal"], ref(), ctx["debut"], ctx["fin"],
+                          centre=ctx["centre"], nom_centre=ctx["nom_centre"])
+
+    # ======================== FIN export releve Excel ========================
 
     # ---------------- validation ---------------------------------------------
 
