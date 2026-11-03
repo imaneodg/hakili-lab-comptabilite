@@ -25,6 +25,7 @@ Lisez dans l'ordre. Comptez une journée pour tout lire et une deuxième pour fa
 | 13 | `13_etat_actuel_et_chantiers.md` | Où en est le projet le 08/10/2026 et ce qu'il faut faire ensuite, par priorité |
 | 14 | `14_historique_des_decisions.md` | Les décisions prises en cours de route et pourquoi |
 | 15 | `15_glossaire_et_faq.md` | Les mots du métier et les questions qu'on se pose la première semaine |
+| 16 | `16_guide_de_reprise.md` | **Par où commencer concrètement** : notions clés, travailler avec Git et GitHub (branches, Pull Requests), plan d'apprentissage du code et règles d'or pour modifier sans risque |
 
 Le même contenu existe en un seul livre Word et PDF (`HAKILI_LAB_Dossier_de_passation`), à lire d'une traite.
 
