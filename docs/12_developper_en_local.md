@@ -67,6 +67,46 @@ python verifier.py
 
 Ce script recrée `hakili_test` depuis `schema.sql` + `seed.sql`, joue les migrations et lance pytest dessus. Il ne touche jamais votre base de travail ni la production. Au 08/10/2026 : **299 tests, tous réussis.**
 
+### Préparer la base de test `hakili_test` (une seule fois)
+
+`verifier.py` ne crée pas la base : il la vide et la remplit à chaque lancement. Il faut donc la créer une fois, à la main :
+
+1. Dans pgAdmin, connectez-vous avec l'administrateur **`postgres`**.
+2. Clic droit sur **Databases** → **Create** → **Database…**
+3. **Database** : `hakili_test`. **OID** : laisser vide.
+4. **Owner** : **l'utilisateur de votre `.env`** (le nom après `postgresql://` dans `DATABASE_URL`), **pas** `postgres`.
+5. Onglet **Definition** : **Encoding** `UTF8`, **Template** `template0`.
+6. **Save**, puis `python verifier.py`.
+
+Si ce prérequis manque, `verifier.py` s'arrête avec un message qui dit exactement quoi faire.
+
+### Les questions qu'on se pose la première fois
+
+**Pourquoi `verifier.py` ne crée-t-il pas la base lui-même ?**
+Parce que l'utilisateur du `.env` est volontairement un rôle **aux droits limités** : il n'a pas le droit de créer des bases (`CREATEDB`). C'est une précaution : l'application et les tests ne disposent que des droits dont ils ont besoin, et un script mal réglé ne peut pas toucher aux autres bases. L'administrateur `postgres` crée la base une fois et la confie à l'utilisateur limité.
+
+**Je suis administratrice de mon PC : pourquoi « droit refusé » ?**
+Les comptes Windows et les utilisateurs PostgreSQL sont deux systèmes séparés. Être administrateur de Windows ne donne aucun droit dans PostgreSQL. `verifier.py` se connecte avec l'utilisateur écrit dans `DATABASE_URL` (`.env`), pas avec votre compte Windows ni avec celui de pgAdmin.
+
+**Pourquoi l'Owner doit-il être l'utilisateur du `.env`, et pas `postgres` ?**
+`verifier.py` exécute `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` puis crée toutes les tables. Depuis PostgreSQL 15, seul le propriétaire de la base peut le faire. Avec `postgres` comme propriétaire, le script s'arrête sur « droit refusé ».
+
+**Devenir Owner donne-t-il le droit de créer des bases ?**
+Non. Le propriétaire peut tout faire **dans `hakili_test` uniquement**. Il ne peut toujours pas créer d'autres bases ni toucher à celles dont il n'est pas propriétaire.
+
+**Pourquoi `template0` ?**
+Une nouvelle base est une copie d'un modèle. Le modèle par défaut, `template1`, a l'encodage choisi à l'installation (souvent WIN1252 sous Windows en français), et PostgreSQL refuse d'en tirer une base UTF8. `template0`, vierge, peut être copié dans n'importe quel encodage. L'UTF8 est indispensable : les fichiers SQL et les données contiennent des accents.
+
+**J'ai oublié le mot de passe de `postgres`.**
+C'est celui choisi à l'installation de PostgreSQL. Pour le réinitialiser : ouvrir `C:\Program Files\PostgreSQL\<version>\data\pg_hba.conf` en administrateur (après en avoir fait une copie), remplacer `scram-sha-256` par `trust` sur les lignes `127.0.0.1/32` et `::1/128`, redémarrer le service `postgresql-x64-<version>`, se connecter sans mot de passe et lancer `ALTER USER postgres PASSWORD 'nouveau';`. **Puis remettre `scram-sha-256` et redémarrer le service** : ne jamais laisser `trust`.
+
+**Et la vraie base `Hakili_compta`, qui l'a créée ?**
+Sur le serveur, le conteneur `db` (image `postgres:16`), automatiquement au premier démarrage sur un volume vide, à partir de `POSTGRES_USER`, `POSTGRES_DB` et de `schema.sql` + `seed.sql` (voir `docker-compose.yml` et le chapitre 11). Sur un poste de développement, une base de travail se crée à la main comme `hakili_test`.
+
+### Problème connu
+
+Au 05/11/2026, `test_transferts_internes.py::test_un_transfert_ne_cree_ni_recette_ni_depense` échoue **pendant les 5 premiers jours de chaque mois**. Le test date l'encaissement de « aujourd'hui moins 5 jours » mais calcule les recettes du mois de « aujourd'hui moins 2 jours » : en début de mois, les deux dates tombent dans des mois différents. C'est le test qui est à corriger, pas l'application.
+
 Pour un seul fichier : `python -m pytest tests/test_modeles.py -v` (attention, il utilise alors le `DATABASE_URL` de votre `.env`).
 
 | Fichier de test | Ce qu'il protège |
