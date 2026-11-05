@@ -65,7 +65,7 @@ La façon sûre de tout lancer :
 python verifier.py
 ```
 
-Ce script recrée `hakili_test` depuis `schema.sql` + `seed.sql`, joue les migrations et lance pytest dessus. Il ne touche jamais votre base de travail ni la production. Au 08/10/2026 : **299 tests, tous réussis.**
+Ce script recrée `hakili_test` depuis `schema.sql` + `seed.sql`, joue les migrations de `sql/migrations/` (comme l'application au démarrage) et lance pytest dessus. Il ne touche jamais votre base de travail ni la production. Au 05/11/2026 : **316 tests**, voir « Résultat attendu » ci-dessous.
 
 ### Préparer la base de test `hakili_test` (une seule fois)
 
@@ -78,7 +78,14 @@ Ce script recrée `hakili_test` depuis `schema.sql` + `seed.sql`, joue les migra
 5. Onglet **Definition** : **Encoding** `UTF8`, **Template** `template0`.
 6. **Save**, puis `python verifier.py`.
 
-Si ce prérequis manque, `verifier.py` s'arrête avec un message qui dit exactement quoi faire.
+Pour que **tous** les tests tournent (y compris la requête libre de l'assistant), créez aussi une fois, dans le Query Tool de pgAdmin connecté en `postgres` (remplacez `nom_utilisateur` par l'utilisateur du `.env`) :
+
+```sql
+CREATE ROLE hakili_lecture NOLOGIN;
+GRANT hakili_lecture TO nom_utilisateur WITH ADMIN OPTION;
+```
+
+Si un de ces prérequis manque, `verifier.py` s'arrête avec un message qui dit exactement quoi faire.
 
 ### Les questions qu'on se pose la première fois
 
@@ -103,9 +110,11 @@ C'est celui choisi à l'installation de PostgreSQL. Pour le réinitialiser : ouv
 **Et la vraie base `Hakili_compta`, qui l'a créée ?**
 Sur le serveur, le conteneur `db` (image `postgres:16`), automatiquement au premier démarrage sur un volume vide, à partir de `POSTGRES_USER`, `POSTGRES_DB` et de `schema.sql` + `seed.sql` (voir `docker-compose.yml` et le chapitre 11). Sur un poste de développement, une base de travail se crée à la main comme `hakili_test`.
 
-### Problème connu
+### Résultat attendu
 
-Au 05/11/2026, `test_transferts_internes.py::test_un_transfert_ne_cree_ni_recette_ni_depense` échoue **pendant les 5 premiers jours de chaque mois**. Le test date l'encaissement de « aujourd'hui moins 5 jours » mais calcule les recettes du mois de « aujourd'hui moins 2 jours » : en début de mois, les deux dates tombent dans des mois différents. C'est le test qui est à corriger, pas l'application.
+`TOUT EST OK - rien n'est casse.` avec 0 test ignoré (*skipped*). Des tests ignorés avec le motif « base PostgreSQL migree indisponible » signalent une base de test sans les migrations.
+
+**Problème connu (05/11/2026)** : `test_transferts_internes.py::test_un_transfert_ne_cree_ni_recette_ni_depense` échoue **pendant les 5 premiers jours de chaque mois**. Le test date l'encaissement de « aujourd'hui moins 5 jours » mais calcule les recettes du mois de « aujourd'hui moins 2 jours » : en début de mois, les deux dates tombent dans des mois différents. C'est le test qui est à corriger, pas l'application.
 
 Pour un seul fichier : `python -m pytest tests/test_modeles.py -v` (attention, il utilise alors le `DATABASE_URL` de votre `.env`).
 

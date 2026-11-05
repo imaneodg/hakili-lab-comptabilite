@@ -1,7 +1,9 @@
 # ---------------------------------------------------------------------------
 # Verifie que le projet est encore fiable apres une modification : recree une
-# base de test jetable a partir de sql/schema.sql + sql/seed.sql, puis lance
-# la vraie suite pytest dessus. Ne touche JAMAIS a Hakili_compta - la base
+# base de test jetable a partir de sql/schema.sql + sql/seed.sql, y joue
+# toutes les migrations de sql/migrations/ (comme l'application au
+# demarrage), puis lance la vraie suite pytest dessus.
+# Ne touche JAMAIS a Hakili_compta - la base
 # reelle n'est ni lue ni modifiee par ce script.
 #
 # Usage (a la racine du projet, environnement virtuel active) :
@@ -42,6 +44,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import psycopg2
 from dotenv import load_dotenv
+
+from logic import migrations
 
 RACINE = Path(__file__).resolve().parent
 NOM_BASE_TEST = "hakili_test"
@@ -138,6 +142,16 @@ def recreer_base_test(url_test):
         conn.close()
 
 
+def jouer_migrations(url_test):
+    """Joue sql/migrations/*.sql sur la base de test, avec le meme lanceur que
+    l'application au demarrage (logic/migrations.py). Sans cette etape, la
+    base de test n'aurait que schema.sql + seed.sql : les tests qui dependent
+    d'une migration seraient ignores ("base PostgreSQL migree indisponible")
+    ou echoueraient, sans que rien ne le signale clairement."""
+    print("Application des migrations (sql/migrations/)...")
+    _etape("migrations sur hakili_test", lambda: migrations.appliquer(url_test))
+
+
 def lancer_tests(url_test):
     print("Lancement de la suite de tests (pytest tests/ -v)...\n")
     env = os.environ.copy()
@@ -150,6 +164,7 @@ def main():
     url_test = url_base_test()
     try:
         recreer_base_test(url_test)
+        jouer_migrations(url_test)
     except PrerequisManquant as e:
         sys.exit(f"\nImpossible de preparer la base de test : {e}")
     except Exception as e:
