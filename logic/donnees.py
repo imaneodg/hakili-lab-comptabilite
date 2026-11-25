@@ -1457,6 +1457,31 @@ def solde_caisse(journal, ref, d=None, centre=None):
     return ouv + d["debit"].sum() - d["credit"].sum()
 
 
+def lignes_brouillard_piece(p, comptes_tresorerie):
+    """Ce que le Brouillard affiche pour la piece `p` (ses lignes
+    d'ecriture) : une liste de (libelle, montant).
+
+    Une ligne par mouvement de tresorerie (21/11/2026, demande de la
+    comptable) : un paiement reparti sur trois mois a trois lignes de caisse
+    (voir logic.modeles._lignes_caisse_jumelles), et le Brouillard les montre
+    toutes, chacune avec son libelle (nature + mois + nom) et son montant.
+    Avant, il ne montrait que le libelle de la PREMIERE ligne de la piece,
+    pour le total : sans mois, et faux des qu'un paiement melait frais,
+    avance et solde.
+
+    Une piece sans ligne de tresorerie (journaux VTE, ACH) garde une seule
+    ligne : son premier libelle et le total de ses debits, comme avant."""
+    mouv = p[p["compte"].isin(comptes_tresorerie)]
+    if "id_ligne" in mouv.columns:
+        # Ordre de saisie : lire_ecritures() ne trie que par piece, pas par
+        # ligne, et la base rend sinon les lignes d'une piece dans le desordre.
+        mouv = mouv.sort_values("id_ligne", kind="mergesort")
+    if len(mouv) == 0:
+        return [(p["libelle"].iloc[0], float(p["debit"].sum()))]
+    return [(lib, float(deb) if deb else float(cre))
+            for lib, deb, cre in zip(mouv["libelle"], mouv["debit"], mouv["credit"])]
+
+
 def mouvements_caisse(d, ref):
     """Entrees et sorties REELLES de tresorerie sur les pieces `d`, plus les
     virements internes a part.

@@ -98,20 +98,29 @@ def test_chaque_libelle_se_relit_sur_son_dernier_mois():
 
 def test_reglement_en_caisse_sur_plusieurs_mois():
     """90 000 F : 60 000 pour octobre et novembre, 30 000 d'avance sur
-    decembre, timbre de 50 F. Deux lignes 401, le timbre, la caisse."""
+    decembre, timbre de 50 F. Deux lignes 401, le timbre, puis une ligne de
+    caisse jumelle pour chacune (21/11/2026)."""
     op = _op("fournisseur", _valeurs([
         {"mois": ["OCTOBRE", "NOVEMBRE"], "nature": "paiement", "montant": 60000},
         {"mois": ["DECEMBRE"], "nature": "avance", "montant": 30000}], 90000, timbre=50), "CMD")
     assert md.operation_equilibree(op)
     L = op[0]["lignes"]
-    assert list(L["compte"]) == ["401000", "401000", "646200", "571200"]
+    assert list(L["compte"]) == ["401000", "401000", "646200", "571200", "571200", "571200"]
     assert L.iloc[0]["libelle"] == "PAIEMENT ETAT VACATION OCT-NOV - KABORE BERNARD"
     assert L.iloc[1]["libelle"] == "AVANCE ETAT VACATION DEC - KABORE BERNARD"
     assert list(L["debit"][:3]) == [60000, 30000, 50]
-    assert L.iloc[3]["credit"] == 90050
-    assert L.iloc[3]["libelle"] == "ETAT VACATION"
+    caisse = L[L["compte"] == "571200"]
+    assert caisse["credit"].sum() == 90050
+    assert list(caisse["libelle"]) == list(L["libelle"][:3])
+    assert list(caisse["credit"]) == [60000, 30000, 50]
     assert all(L.iloc[i]["code_tiers"] == "401KABORE" for i in (0, 1))
-    assert L.iloc[3]["code_tiers"] == ""
+    assert (caisse["code_tiers"] == "").all()
+
+
+def test_reglement_reparti_incompletement_reste_refuse():
+    op = md.construire_operation("fournisseur", _valeurs([
+        {"mois": ["OCTOBRE"], "nature": "paiement", "montant": 60000}], 90000), "CMD", JOURNAUX)
+    assert not md.operation_equilibree(op)
 
 
 def test_reglement_par_banque_meme_logique_sans_timbre():

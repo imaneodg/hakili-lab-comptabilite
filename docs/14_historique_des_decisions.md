@@ -46,6 +46,7 @@ Ce chapitre explique **pourquoi** le code est comme il est. Avant de « simplifi
 | Date d'opération au plus 7 jours après aujourd'hui | 08/10 | une faute de frappe (2062) ne doit pas passer |
 | Écrans de travail : année en cours + pièces non exportées | 08/10 | rapidité ; l'historique se relit par période |
 | Assistant = mêmes chiffres que le tableau de bord pour résultat, charges, marge | 08/10 | jamais deux réponses différentes à la direction |
+| Une ligne de caisse par ligne de tiers (encaissements, règlements fournisseurs), même libellé ; Brouillard à une ligne par mouvement de caisse | 21/11 | demande de la comptable : lire dans le Brouillard quels mois sont payés ; l'ancien libellé global n'avait pas de mois et disait « FRAIS » même pour une avance ou un solde |
 | Code du comptable laissé tel quel | 08/10 | décision d'Afiya, voir chantiers |
 | Impôts (64) en exploitation | reporté | à trancher avec la direction |
 | Une pièce exportée ne peut être réexportée qu'avec un consentement explicite | 08/10 | éviter les doublons dans Sage |

@@ -2377,7 +2377,24 @@ def server(input, output, session):
             d = d[(dts >= pd.Timestamp(periode[0])) & (dts <= pd.Timestamp(periode[1]))]
         return d
 
-    def table_pieces(d, centres):
+    # Brouillard : une ligne par MOUVEMENT DE CAISSE (21/11/2026, demande de
+    # la comptable), donc parfois plusieurs lignes pour une meme piece - un
+    # paiement reparti sur trois mois en a trois (voir
+    # dl.lignes_brouillard_piece). L'index de chaque ligne vaut
+    # "<id_piece>::<rang>" pour rester unique ; _vue_par_piece() le ramene a
+    # l'id_piece, pour que Corriger et Supprimer agissent toujours sur la
+    # piece entiere, jamais sur une ligne seule. La Validation garde une ligne
+    # par piece (par_mouvement=False) : on y valide des pieces.
+    _SEP_MOUVEMENT = "::"
+
+    def _vue_par_piece(sel):
+        if len(sel) == 0 or "Message" in sel.columns:
+            return sel
+        sel = sel.copy()
+        sel.index = [str(i).rpartition(_SEP_MOUVEMENT)[0] or str(i) for i in sel.index]
+        return sel[~sel.index.duplicated()]
+
+    def table_pieces(d, centres, par_mouvement=False):
         if len(d) == 0:
             return pd.DataFrame({"Message": ["Aucune pièce pour ce filtre."]})
         # File d'attente, pas registre comptable : la piece la plus recemment
@@ -2399,20 +2416,26 @@ def server(input, output, session):
         # saisi_le ci-dessus), mais sans rescanner tout le tableau a chaque
         # piece - decisif des que le nombre de pieces grandit (corrige le
         # 13/09/2026, meme optimisation que logic.donnees.controler()).
+        tresorerie = set(ref()["journaux"]["compte_contrepartie"].dropna()) if par_mouvement else set()
         for idp, p in d.groupby("id_piece", sort=False):
             code_centre = p["centre"].iloc[0]
-            lignes.append({
-                "Date": pd.to_datetime(p["date_piece"].iloc[0]).strftime("%d/%m/%Y"),
-                "Piece": dl.ou(p["num_definitif"].iloc[0], p["num_provisoire"].iloc[0]),
-                "Journal": p["journal"].iloc[0],
-                "Centre": noms_centres.get(code_centre, code_centre),
-                "Libelle": p["libelle"].iloc[0],
-                "Montant": dl.fcfa(p["debit"].sum()),
-                "Statut": STATUTS.get(p["statut"].iloc[0], p["statut"].iloc[0]),
-                "Saisi_par": p["saisi_par"].iloc[0],
-                "Observation": p["observation"].iloc[0],
-            })
-            ids.append(idp)
+            if par_mouvement:
+                detail = dl.lignes_brouillard_piece(p, tresorerie)
+            else:
+                detail = [(p["libelle"].iloc[0], float(p["debit"].sum()))]
+            for rang, (libelle, montant) in enumerate(detail):
+                lignes.append({
+                    "Date": pd.to_datetime(p["date_piece"].iloc[0]).strftime("%d/%m/%Y"),
+                    "Piece": dl.ou(p["num_definitif"].iloc[0], p["num_provisoire"].iloc[0]),
+                    "Journal": p["journal"].iloc[0],
+                    "Centre": noms_centres.get(code_centre, code_centre),
+                    "Libelle": libelle,
+                    "Montant": dl.fcfa(montant),
+                    "Statut": STATUTS.get(p["statut"].iloc[0], p["statut"].iloc[0]),
+                    "Saisi_par": p["saisi_par"].iloc[0],
+                    "Observation": p["observation"].iloc[0],
+                })
+                ids.append(f"{idp}{_SEP_MOUVEMENT}{rang}" if par_mouvement else idp)
         out = pd.DataFrame(lignes)
         out.index = ids
         return out
@@ -2518,7 +2541,7 @@ def server(input, output, session):
 
     @render.data_frame
     def b_table():
-        return grille_pieces(table_pieces(pieces_vue(), ref()["centres"]), "row")
+        return grille_pieces(table_pieces(pieces_vue(), ref()["centres"], par_mouvement=True), "row")
 
     @reactive.effect
     @reactive.event(input.b_supprimer)
@@ -2537,7 +2560,7 @@ def server(input, output, session):
         u = util()
         if u is None:
             return
-        sel = b_table.data_view(selected=True)
+        sel = _vue_par_piece(b_table.data_view(selected=True))
         if len(sel) == 0 or "Message" in sel.columns:
             ui.notification_show("Choisir d'abord une pièce.", type="warning")
             return
@@ -2569,7 +2592,7 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.b_corriger)
     def _corriger():
-        _ouvrir_correction(b_table.data_view(selected=True))
+        _ouvrir_correction(_vue_par_piece(b_table.data_view(selected=True)))
 
     @reactive.effect
     @reactive.event(input.v_corriger)
