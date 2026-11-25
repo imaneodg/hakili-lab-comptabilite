@@ -60,6 +60,8 @@ Le détail de chaque modèle et des écritures produites est au chapitre 4.
 
 La liste des pièces, avec trois filtres : statut, journal, période (du 1er du mois à aujourd'hui par défaut). Une période qui commence avant le 1er janvier de l'année en cours va relire l'historique en base.
 
+Le tableau a **une ligne par mouvement de caisse** (depuis le 21/11/2026) : un paiement réparti sur trois mois apparaît sur trois lignes, chacune avec sa nature, son mois et son montant, et le même numéro de pièce. Une pièce sans ligne de caisse (journaux VTE, ACH) garde une seule ligne. Corriger et Supprimer agissent toujours sur **la pièce entière**, quelle que soit la ligne sélectionnée. L'onglet Validation, lui, garde une ligne par pièce.
+
 Au-dessus du tableau, un bandeau d'indicateurs : pièces affichées, entrées en caisse, sorties de caisse, virements internes (les mouvements via 585000, comptés une seule fois), puis le solde de chaque caisse visible. Les soldes portent toujours sur **tout l'historique**, quel que soit le filtre.
 
 Actions sur la pièce sélectionnée :

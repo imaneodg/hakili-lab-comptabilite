@@ -62,13 +62,14 @@ def _encaissement(activite, nature="avance", mois=("JUILLET",)):
 
 def test_encaissement_du_camp_ecrit_cv():
     L = _op("encaissement", _encaissement("camp"), "CP")[0]["lignes"]
-    assert list(L["libelle"]) == ["FRAIS CV - KABRE CHARLES ELIEL", "AVANCE CV JUIL - KABRE CHARLES ELIEL"]
+    # Caisse et 411 portent le meme libelle depuis le 21/11/2026.
+    assert list(L["libelle"]) == ["AVANCE CV JUIL - KABRE CHARLES ELIEL"] * 2
     assert all(md.libelle_reconnu_camp(x) for x in L["libelle"])
 
 
 def test_encaissement_des_cours_inchange():
     L = _op("encaissement", _encaissement("cours"), "CP")[0]["lignes"]
-    assert list(L["libelle"]) == ["FRAIS CA - KABRE CHARLES ELIEL", "AVANCE CA JUIL - KABRE CHARLES ELIEL"]
+    assert list(L["libelle"]) == ["AVANCE CA JUIL - KABRE CHARLES ELIEL"] * 2
     assert not any(md.libelle_reconnu_camp(x) for x in L["libelle"])
     # une piece enregistree avant le 07/10/2026 n'a pas d'activite : cours d'appui
     sans = {k: v for k, v in _encaissement("cours").items() if k != "activite"}

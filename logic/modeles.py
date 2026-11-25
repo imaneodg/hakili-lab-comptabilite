@@ -491,10 +491,10 @@ MODELES = [
             {"n": "repartition", "l": "Repartition", "t": "repartition",
              "natures": NATURES_ENCAISSEMENT},
         ],
-        # Libelle de la ligne de caisse (voir _lignes_encaissement) : pas de
-        # mois ici, une seule ligne ne peut pas resumer plusieurs mois et
-        # natures a la fois - ils restent precises sur chaque ligne 411. Meme
-        # forme courte que celles-ci, pour que la piece se lise d'un bloc.
+        # Libelle global de la piece. Depuis le 21/11/2026 il ne sert plus de
+        # libelle a la caisse (chaque ligne de caisse reprend celui de sa
+        # ligne 411, voir _lignes_caisse_jumelles), sauf pour une repartition
+        # incomplete, que operation_equilibree() refuse de toute facon.
         "libelle": lambda v: f"{'FRAIS CV' if est_camp(v) else 'FRAIS CA'} - {v.get('tiers_nom', '')}",
         "lignes": lambda v, cc: _lignes_encaissement(v, cc),
     },
@@ -930,22 +930,35 @@ def _lignes_achat(v):
     return L
 
 
-# Genere la piece du formulaire "encaissement" (mode multi-mois) : une
-# ligne de caisse (debit = montant total recu) et une ligne 411000 par
-# entree de repartition (credit), libellee selon sa nature. Ne fait aucun
-# controle d'equilibre lui-meme - si la somme des lignes ne vaut pas le
-# montant total, la piece renvoyee est simplement desequilibree, et
-# operation_equilibree() (deja generique) le signale comme pour tout autre
-# modele : aucune logique de controle dupliquee ici.
+# Lignes de caisse "jumelles" (21/11/2026, demande de la comptable) : une
+# ligne de tresorerie par ligne de tiers, meme libelle, meme montant, sens
+# oppose. Avant, la caisse portait une seule ligne pour le total, au libelle
+# global ("FRAIS CA - NOM") : sans mois, et faux des qu'un paiement melait
+# frais, avance et solde. Le Brouillard, qui montre les mouvements de
+# caisse, ne disait donc jamais quels mois etaient payes.
 #
-# Libelle de la ligne de caisse (spec 2026) : identique au libelle complet
-# de l'unique ligne 411 pour un encaissement a une seule operation (le cas
-# le plus frequent - le comptable doit lire le meme texte des deux cotes).
-# Quand plusieurs operations sont regroupees en un seul reglement (frais +
-# avance, par exemple), aucun texte unique ne peut resumer plusieurs mois/
-# natures a la fois : la ligne de caisse garde alors le libelle global
-# "FRAIS DE COURS D'APPUI - NOM" (v["lib"], voir le modele "encaissement"
-# ci-dessus), sans mois - il reste precise sur chaque ligne 411 de detail.
+# La piece reste equilibree ligne a ligne (Sage l'accepte), le solde de
+# caisse est inchange (meme total), et le tableau de bord n'est pas touche :
+# il ne lit que les lignes hors tresorerie (flux_tableau_bord).
+def _lignes_caisse_jumelles(lignes_tiers, cc, sens):
+    return [ligne(cc, l["libelle"], **{sens: l["credit"] if sens == "debit" else l["debit"]})
+            for l in lignes_tiers]
+
+
+# Vrai si les lignes de tiers repartissent exactement le montant paye (au
+# franc pres, comme operation_equilibree).
+def _repartition_complete(lignes_tiers, sens, montant_total):
+    return round(sum(l[sens] for l in lignes_tiers)) == round(montant_total)
+
+
+# Genere la piece du formulaire "encaissement" (mode multi-mois) : une
+# ligne 411000 par entree de repartition (credit), libellee selon sa nature
+# et ses mois, et sa ligne de caisse jumelle au debit (voir
+# _lignes_caisse_jumelles). Ne fait aucun controle d'equilibre lui-meme - si
+# la somme des lignes ne vaut pas le montant total recu, la piece renvoyee
+# est simplement desequilibree, et operation_equilibree() (deja generique)
+# le signale comme pour tout autre modele : aucune logique de controle
+# dupliquee ici.
 def _lignes_encaissement(v, cc):
     montant_total = float(un(v.get("montant"), 0) or 0)
     if montant_total <= 0:
@@ -964,11 +977,14 @@ def _lignes_encaissement(v, cc):
         lignes_411.append(ligne("411000", libelle, credit=montant, code_tiers=v.get("tiers", "")))
     if not lignes_411:
         return None
-    # La ligne de caisse porte toujours le libelle global, y compris quand il
-    # n'y a qu'une seule ligne 411 : elle est la seule ligne de la piece sans
-    # code tiers, donc la seule ou le nom est la seule indication de qui a
-    # paye - c'est cette ligne que la caissiere relit dans son brouillard.
-    return _df(ligne(cc, v["lib"], debit=montant_total), *lignes_411)
+    if not _repartition_complete(lignes_411, "credit", montant_total):
+        # Repartition qui ne fait pas le montant recu : on garde UNE ligne de
+        # caisse pour le total, la piece est desequilibree et
+        # operation_equilibree() la refuse, exactement comme avant. Des
+        # lignes jumelles l'auraient equilibree en silence et l'ecart entre
+        # l'argent recu et l'argent reparti aurait disparu.
+        return _df(ligne(cc, v["lib"], debit=montant_total), *lignes_411)
+    return _df(*_lignes_caisse_jumelles(lignes_411, cc, "debit"), *lignes_411)
 
 
 def _lignes_avance_paiement(v, cc):
@@ -1024,12 +1040,17 @@ def _lignes_fournisseur(v, cc):
                                 code_tiers=v.get("tiers", "")))
     if not lignes_401:
         return None
-    L = _df(*lignes_401)
     timbre = float(un(v.get("timbre"), 0) or 0)
-    if timbre > 0:
-        L = pd.concat([L, _df(ligne("646200", f"TIMBR/{v['lib']}", debit=timbre))], ignore_index=True)
-    L = pd.concat([L, _df(ligne(cc, v["lib"], credit=montant_total + timbre))], ignore_index=True)
-    return L
+    lignes_timbre = [ligne("646200", f"TIMBR/{v['lib']}", debit=timbre)] if timbre > 0 else []
+    if not _repartition_complete(lignes_401, "debit", montant_total):
+        # Meme garde que _lignes_encaissement : une seule ligne de tresorerie
+        # pour le total, piece desequilibree, refusee par operation_equilibree().
+        return _df(*lignes_401, *lignes_timbre, ligne(cc, v["lib"], credit=montant_total + timbre))
+    # Lignes de tresorerie jumelles (21/11/2026, voir _lignes_caisse_jumelles),
+    # y compris pour le timbre : chaque sortie de caisse ou de banque porte le
+    # libelle de ce qu'elle paie.
+    return _df(*lignes_401, *lignes_timbre,
+               *_lignes_caisse_jumelles(lignes_401 + lignes_timbre, cc, "credit"))
 
 
 def modele_par_id(id_):

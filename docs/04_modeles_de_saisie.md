@@ -39,9 +39,12 @@ Le formulaire le plus utilisé. Champs : élève (411), activité (Cours d'appui
 
 | Compte | Libellé | Débit | Crédit |
 |---|---|---|---|
-| caisse | `FRAIS CA - NOM` | total | |
+| caisse | `FRAIS CA OCT - NOM` | ligne 1 | |
+| caisse | `AVANCE CA NOV-DEC - NOM` | ligne 2 | |
 | 411000 + tiers | `FRAIS CA OCT - NOM` | | ligne 1 |
 | 411000 + tiers | `AVANCE CA NOV-DEC - NOM` | | ligne 2 |
+
+Depuis le 21/11/2026, la caisse a **une ligne par ligne 411**, avec le même libellé et le même montant (`_lignes_caisse_jumelles`). Avant, une seule ligne de caisse portait le total sous un libellé global `FRAIS CA - NOM`, sans mois, et faux quand un paiement mêlait frais, avance et solde. Le Brouillard, le relevé Excel et le compte caisse dans Sage disent maintenant quels mois sont payés. Si la répartition ne fait pas le montant reçu, la caisse garde une seule ligne pour le total : la pièce est déséquilibrée et refusée, comme avant.
 
 Pour le camp : `FRAIS CV`, `AVANCE CV`, `SOLDE CV`. C'est ce libellé qui permet au tableau de bord de séparer le camp des cours. Les mois sont toujours écrits dans l'ordre de l'année scolaire (septembre → août), abrégés et tous cités (`OCT-NOV-DEC`). Si la somme des lignes ne fait pas le total, la pièce est déséquilibrée et ne s'enregistre pas.
 
@@ -116,7 +119,11 @@ Champs : fournisseur (401), libellé, activité, montant payé, répartition (Pa
 | 401000 + tiers | `PAIEMENT ETAT VACATION OCT - NOM` | ligne 1 | |
 | 401000 + tiers | `AVANCE LOYER NOV-DEC - NOM` | ligne 2 | |
 | 646200 | `TIMBR/…` | timbre | |
-| caisse ou banque | | | total + timbre |
+| caisse ou banque | `PAIEMENT ETAT VACATION OCT - NOM` | | ligne 1 |
+| caisse ou banque | `AVANCE LOYER NOV-DEC - NOM` | | ligne 2 |
+| caisse ou banque | `TIMBR/…` | | timbre |
+
+Même règle que l'encaissement depuis le 21/11/2026 : une ligne de trésorerie par ligne 401 et pour le timbre, avec le même libellé.
 
 Pour le camp, le mot `CAMP` est ajouté en tête du libellé tapé. Une faiblesse connue : la nature de la charge n'est que dans le libellé libre, le tableau de bord la devine par mots-clés (voir chapitre 8 et chantiers).
 

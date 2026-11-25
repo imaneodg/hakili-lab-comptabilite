@@ -102,7 +102,11 @@ def calculer_releve(journal, ref, debut, fin, d=None, centre=None, maj_solde_off
     point_depart = ouverture + (float(avant["debit"].sum() - avant["credit"].sum()) if len(avant) else 0.0)
 
     periode = d[(d["_date"] >= debut) & (d["_date"] <= fin)] if len(d) else d
-    periode = periode.sort_values(["date_piece", "id_piece"], kind="mergesort")
+    # id_ligne en dernier (21/11/2026) : un encaissement reparti sur plusieurs
+    # mois a une ligne de caisse par mois (logic.modeles._lignes_caisse_jumelles),
+    # a lire dans l'ordre ou elles ont ete saisies.
+    cles = ["date_piece", "id_piece"] + (["id_ligne"] if "id_ligne" in periode.columns else [])
+    periode = periode.sort_values(cles, kind="mergesort")
 
     if maj_solde_officiel is None:
         maj_solde_officiel = _maj_solde_officiel(journal, centre_effectif, physique)

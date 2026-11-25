@@ -183,26 +183,46 @@ def test_plusieurs_mois_sur_une_ligne_donnent_une_seule_ecriture():
 
 def test_un_reliquat_se_saisit_sur_une_deuxieme_ligne():
     """80 000 F : deux mois entiers, puis le reliquat en avance sur le
-    troisieme. Deux ecritures 411, une seule piece, un seul mouvement de
-    caisse - l'eleve n'a donne l'argent qu'une fois."""
+    troisieme. Deux ecritures 411, une seule piece ; la caisse a une ligne
+    jumelle par ecriture 411 (21/11/2026), le total encaisse est inchange."""
     L = _piece([{"mois": ["OCTOBRE", "NOVEMBRE"], "nature": "frais", "montant": 60000},
                 {"mois": ["DECEMBRE"], "nature": "avance", "montant": 20000}], 80000)
-    assert len(L) == 3
-    assert L.iloc[1]["libelle"] == "FRAIS CA OCT-NOV - OUEDRAOGO AFIYA IMANE"
-    assert L.iloc[2]["libelle"] == "AVANCE CA DEC - OUEDRAOGO AFIYA IMANE"
+    assert len(L) == 4
+    assert L.iloc[2]["libelle"] == "FRAIS CA OCT-NOV - OUEDRAOGO AFIYA IMANE"
+    assert L.iloc[3]["libelle"] == "AVANCE CA DEC - OUEDRAOGO AFIYA IMANE"
+    assert L[L["compte"] == "571100"]["debit"].sum() == 80000
     assert md.operation_equilibree([{"lignes": L, "journal": "CP"}])
 
 
-def test_la_ligne_de_caisse_porte_le_nom_sans_les_mois():
-    """Elle est la seule ligne de la piece sans code tiers : le nom y est la
-    seule indication de qui a paye. Elle ne cite pas de mois - une ligne
-    unique ne peut pas resumer plusieurs mois et natures a la fois."""
-    L = _piece([{"mois": ["OCTOBRE"], "nature": "frais", "montant": 30000},
-                {"mois": ["NOVEMBRE"], "nature": "avance", "montant": 20000}], 50000)
-    caisse = L.iloc[0]
-    assert caisse["code_tiers"] == ""
-    assert caisse["libelle"] == "FRAIS CA - OUEDRAOGO AFIYA IMANE"
-    assert all(L.iloc[i]["code_tiers"] == "411OUEDRAOGOAFIYA" for i in (1, 2))
+def test_chaque_ligne_de_caisse_porte_le_libelle_de_sa_ligne_411():
+    """Demande de la comptable (21/11/2026) : le Brouillard montre les
+    mouvements de caisse, il doit dire quels mois et quelles natures sont
+    payes. Une ligne de caisse par ligne 411, meme libelle, meme montant."""
+    L = _piece([{"mois": ["NOVEMBRE"], "nature": "avance", "montant": 30000},
+                {"mois": ["DECEMBRE"], "nature": "solde", "montant": 45000},
+                {"mois": ["JANVIER"], "nature": "frais", "montant": 25000}], 100000)
+    caisse = L[L["compte"] == "571100"]
+    tiers = L[L["compte"] == "411000"]
+    assert list(caisse["libelle"]) == list(tiers["libelle"]) == [
+        "AVANCE CA NOV - OUEDRAOGO AFIYA IMANE",
+        "SOLDE CA DEC - OUEDRAOGO AFIYA IMANE",
+        "FRAIS CA JAN - OUEDRAOGO AFIYA IMANE"]
+    assert list(caisse["debit"]) == list(tiers["credit"]) == [30000, 45000, 25000]
+    assert (caisse["code_tiers"] == "").all()
+    assert (tiers["code_tiers"] == "411OUEDRAOGOAFIYA").all()
+
+
+def test_un_seul_mois_meme_libelle_des_deux_cotes():
+    L = _piece([{"mois": ["NOVEMBRE"], "nature": "frais", "montant": 30000}], 30000)
+    assert list(L["compte"]) == ["571100", "411000"]
+    assert list(L["libelle"]) == ["FRAIS CA NOV - OUEDRAOGO AFIYA IMANE"] * 2
+
+
+def test_une_repartition_incomplete_reste_refusee():
+    """Les lignes jumelles ne doivent pas equilibrer en silence une piece
+    dont la repartition ne fait pas le montant recu."""
+    L = _piece([{"mois": ["OCTOBRE"], "nature": "frais", "montant": 30000}], 50000)
+    assert not md.operation_equilibree([{"lignes": L, "journal": "CP"}])
 
 
 def test_une_ligne_sans_mois_est_ignoree():

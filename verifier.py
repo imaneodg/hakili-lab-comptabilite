@@ -1,19 +1,31 @@
 # ---------------------------------------------------------------------------
 # Verifie que le projet est encore fiable apres une modification : recree une
-# base de test jetable a partir de sql/schema.sql + sql/seed.sql, puis lance
-# la vraie suite pytest dessus. Ne touche JAMAIS a Hakili_compta - la base
+# base de test jetable a partir de sql/schema.sql + sql/seed.sql, y joue
+# toutes les migrations de sql/migrations/ (comme l'application au
+# demarrage), puis lance la vraie suite pytest dessus.
+# Ne touche JAMAIS a Hakili_compta - la base
 # reelle n'est ni lue ni modifiee par ce script.
 #
 # Usage (a la racine du projet, environnement virtuel active) :
 #     python verifier.py
 #
 # Prerequis, a faire une seule fois : creer dans pgAdmin, sur le meme
-# serveur Postgres que Hakili_compta, une base VIDE nommee "hakili_test"
-# (clic droit sur Databases -> Create -> Database -> Database name:
-# hakili_test -> onglet "Definition" -> Encoding: UTF8). Le script se charge
-# ensuite de tout le reste a chaque execution : il efface et recree le
-# contenu de cette base de test a partir des fichiers reels du projet,
-# jamais de Hakili_compta.
+# serveur Postgres que Hakili_compta, une base VIDE nommee "hakili_test" :
+#   - se connecter dans pgAdmin avec l'administrateur "postgres" ;
+#   - clic droit sur Databases -> Create -> Database ;
+#   - Database : hakili_test ;
+#   - Owner : l'utilisateur de DATABASE_URL (.env), PAS "postgres" ;
+#   - onglet Definition : Encoding UTF8, Template template0.
+# Le script se charge ensuite de tout le reste a chaque execution : il
+# efface et recree le contenu de cette base de test a partir des fichiers
+# reels du projet, jamais de Hakili_compta.
+#
+# Pourquoi cette creation est manuelle (decision confirmee le 05/11/2026) :
+# l'utilisateur de DATABASE_URL est volontairement un role aux droits
+# limites, sans le droit CREATEDB. Il ne peut donc pas creer de base lui-
+# meme : c'est l'administrateur "postgres" qui la cree une fois et la lui
+# confie (Owner). Le role limite reste ainsi incapable de creer ou de toucher
+# d'autres bases. Explications detaillees : docs/12_developper_en_local.md.
 #
 # Si "hakili_test" a ete creee sans forcer Encoding: UTF8 (frequent sur un
 # Postgres installe avec une locale Windows francaise, qui propose souvent
@@ -32,6 +44,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import psycopg2
 from dotenv import load_dotenv
+
+from logic import migrations
 
 RACINE = Path(__file__).resolve().parent
 NOM_BASE_TEST = "hakili_test"
@@ -56,15 +70,45 @@ def _etape(nom, fn):
     a corriger a l'aveugle. Le traceback complet reste imprime en plus."""
     try:
         return fn()
+    except PrerequisManquant:
+        raise  # deja explique clairement : pas de traceback
     except Exception:
         print(f"\n--- Echec a l'etape : {nom} ---")
         traceback.print_exc()
         raise RuntimeError(f"echec a l'etape « {nom} » (traceback complet ci-dessus)")
 
 
+class PrerequisManquant(Exception):
+    """Probleme de preparation connu, avec une explication complete pour
+    l'utilisateur : affiche tel quel, sans traceback."""
+
+
+def _connexion_base_test(url_test):
+    try:
+        return psycopg2.connect(url_test)
+    except psycopg2.OperationalError as e:
+        # 3D000 = la base n'existe pas. Le code n'est pas toujours renseigne a
+        # la connexion : on reconnait aussi le message, en anglais ou en
+        # francais selon la langue du serveur Postgres.
+        texte = str(e)
+        if e.pgcode == "3D000" or NOM_BASE_TEST in texte and (
+                "does not exist" in texte or "n'existe pas" in texte):
+            utilisateur = urlsplit(url_test).username or "?"
+            raise PrerequisManquant(
+                f"la base '{NOM_BASE_TEST}' n'existe pas encore sur ce serveur Postgres.\n"
+                f"A creer une seule fois dans pgAdmin, connecte avec 'postgres' :\n"
+                f"  clic droit sur Databases -> Create -> Database\n"
+                f"  Database : {NOM_BASE_TEST}\n"
+                f"  Owner    : {utilisateur}   (l'utilisateur du .env, pas 'postgres')\n"
+                f"  onglet Definition : Encoding UTF8, Template template0\n"
+                f"Explications : docs/12_developper_en_local.md"
+            ) from None
+        raise
+
+
 def recreer_base_test(url_test):
     print(f"Recreation de la base de test '{NOM_BASE_TEST}' a partir de sql/schema.sql et sql/seed.sql...")
-    conn = _etape("connexion a hakili_test", lambda: psycopg2.connect(url_test))
+    conn = _etape("connexion a hakili_test", lambda: _connexion_base_test(url_test))
     # Force l'encodage de la connexion independamment de celui negocie par
     # defaut avec le serveur : sur certaines installations Postgres/Windows,
     # une base creee sans preciser Encoding: UTF8 herite de l'encodage de la
@@ -77,8 +121,17 @@ def recreer_base_test(url_test):
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            _etape("DROP/CREATE SCHEMA public",
-                   lambda: cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+            try:
+                cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            except psycopg2.errors.InsufficientPrivilege:
+                utilisateur = urlsplit(url_test).username or "?"
+                raise PrerequisManquant(
+                    f"l'utilisateur '{utilisateur}' n'a pas le droit de vider la base '{NOM_BASE_TEST}' : "
+                    f"il n'en est probablement pas le proprietaire.\n"
+                    f"Dans pgAdmin, connecte avec 'postgres' : clic droit sur {NOM_BASE_TEST} -> Properties "
+                    f"-> Owner : {utilisateur} -> Save.\n"
+                    f"Explications : docs/12_developper_en_local.md"
+                ) from None
             texte_schema = _etape("lecture de sql/schema.sql",
                                    lambda: (RACINE / "sql" / "schema.sql").read_text(encoding="utf-8"))
             _etape("execution de sql/schema.sql", lambda: cur.execute(texte_schema))
@@ -87,6 +140,16 @@ def recreer_base_test(url_test):
             _etape("execution de sql/seed.sql", lambda: cur.execute(texte_seed))
     finally:
         conn.close()
+
+
+def jouer_migrations(url_test):
+    """Joue sql/migrations/*.sql sur la base de test, avec le meme lanceur que
+    l'application au demarrage (logic/migrations.py). Sans cette etape, la
+    base de test n'aurait que schema.sql + seed.sql : les tests qui dependent
+    d'une migration seraient ignores ("base PostgreSQL migree indisponible")
+    ou echoueraient, sans que rien ne le signale clairement."""
+    print("Application des migrations (sql/migrations/)...")
+    _etape("migrations sur hakili_test", lambda: migrations.appliquer(url_test))
 
 
 def lancer_tests(url_test):
@@ -101,6 +164,9 @@ def main():
     url_test = url_base_test()
     try:
         recreer_base_test(url_test)
+        jouer_migrations(url_test)
+    except PrerequisManquant as e:
+        sys.exit(f"\nImpossible de preparer la base de test : {e}")
     except Exception as e:
         sys.exit(
             f"Impossible de preparer la base de test '{NOM_BASE_TEST}' : {e}\n"
